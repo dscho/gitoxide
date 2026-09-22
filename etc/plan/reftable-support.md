@@ -333,6 +333,11 @@ assignment must start with it too.
 > development process, not only formatting. No implementation or commit passes
 > without satisfying it.
 
+**Status: complete.** The `reftables-task1` topic was integrated by merge
+`07d7d3014`. The independent fixtures and Git-oracle checks cover both hash
+formats without depending on `gix-ref`. This completes the groundwork, not
+native storage; policy-API contracts remain deferred to Task 6.
+
 Establish `gix-reftable` as the workspace crate containing these fixtures and
 Git-oracle checks. It must not depend on `gix-ref`, even for tests: `gix-ref`
 will eventually depend on this crate. Use `gix-testtools` without its
