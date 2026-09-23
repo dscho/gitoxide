@@ -13,5 +13,9 @@ fuzz_target!(|data: &[u8]| {
         while let Ok(Some(log)) = logs.next_record() {
             _ = black_box(log);
         }
+        let mut objects = table.objects();
+        while let Ok(Some(object)) = objects.next_record() {
+            _ = black_box(object);
+        }
     }
 });

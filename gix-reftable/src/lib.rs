@@ -62,8 +62,21 @@ pub struct LogRef<'a> {
     pub data: Option<log::DataRef<'a>>,
 }
 
+/// A decoded object-index record borrowing its cursor's buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectRef<'a> {
+    /// The abbreviated binary object ID.
+    pub hash_prefix: &'a [u8],
+    /// Absolute positions of candidate reference blocks.
+    ///
+    /// An empty slice means references must be scanned instead.
+    pub block_offsets: &'a [usize],
+}
+
 /// Reflog records and their reusable read cursor.
 pub mod log;
+/// Reverse object-index records and their reusable read cursor.
+pub mod object;
 /// Reference records and their reusable read cursor.
 pub mod reference;
 

@@ -35,5 +35,6 @@ fn table_paths() -> Result<Vec<PathBuf>> {
 
 mod envelope;
 mod log;
+mod object;
 mod oracle;
 mod reference;

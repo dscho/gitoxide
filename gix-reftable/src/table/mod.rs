@@ -66,6 +66,22 @@ impl<'a> Table<'a> {
         (self.footer.objects != 0).then_some(self.footer.objects)
     }
 
+    pub(crate) fn objects_end(&self) -> usize {
+        [self.footer.logs, self.body_end()]
+            .into_iter()
+            .filter(|offset| *offset != 0 && *offset > self.footer.objects)
+            .min()
+            .expect("the logs or footer always follow the object section")
+    }
+
+    pub(crate) fn object_index_start(&self) -> Option<usize> {
+        (self.footer.object_index != 0).then_some(self.footer.object_index)
+    }
+
+    pub(crate) fn object_id_len(&self) -> usize {
+        self.footer.object_id_len
+    }
+
     pub(crate) fn logs_end(&self) -> usize {
         self.body_end()
     }

@@ -55,7 +55,7 @@ fn object_record() -> Vec<u8> {
     record
 }
 
-fn named_object_record(name: &[u8], byte: u8) -> Vec<u8> {
+pub(super) fn named_object_record(name: &[u8], byte: u8) -> Vec<u8> {
     let mut record = vec![0];
     super::log::varint((name.len() as u64) << 3 | 1, &mut record);
     record.extend_from_slice(name);
