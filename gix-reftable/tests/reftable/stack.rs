@@ -38,6 +38,16 @@ fn reference_names(mut references: Iter<'_>) -> Result<Vec<BString>> {
     Ok(names)
 }
 
+fn logs_table(records: &[(&[u8], u64, bool)]) -> crate::Result<Vec<u8>> {
+    let mut encoded = Vec::new();
+    let mut restarts = Vec::new();
+    for (name, index, update) in records {
+        restarts.push(encoded.len());
+        encoded.extend(super::log::record(name, *index, *update));
+    }
+    super::log::log_table(&encoded, &restarts)
+}
+
 #[test]
 fn references_prefer_newer_tables_and_hide_tombstones() -> crate::Result {
     let old = refs_table(&[(b"refs/a", Some(1)), (b"refs/b", Some(1))]);
@@ -75,6 +85,24 @@ fn prefixed_reference_iteration_stops_at_the_prefix_boundary() -> crate::Result 
     let references = snapshot.references_prefixed("refs/heads/".into())?;
     let names = reference_names(references)?;
     assert_eq!(names, ["refs/heads/a", "refs/heads/b"]);
+    Ok(())
+}
+
+#[test]
+fn logs_merge_by_key_and_hide_newer_tombstones() -> crate::Result {
+    let old = logs_table(&[(b"refs/a", 9, true), (b"refs/a", 8, true)])?;
+    let new = logs_table(&[(b"refs/a", 10, true), (b"refs/a", 9, false)])?;
+    let snapshot = snapshot([("old".into(), old), ("new".into(), new)])?;
+    let mut logs = snapshot.logs("refs/a".into())?;
+    let mut indices = Vec::new();
+    while let Some(record) = logs.next_record()? {
+        indices.push(record.update_index);
+    }
+    assert_eq!(
+        indices,
+        [10, 8],
+        "newer tombstone suppresses the duplicate update index"
+    );
     Ok(())
 }
 
@@ -128,6 +156,26 @@ fn merged_cursor_errors_are_terminal_without_exposing_stale_records() -> crate::
     assert!(
         references.next_record()?.is_none(),
         "a terminal error cannot expose an older table's stale record"
+    );
+    Ok(())
+}
+
+#[test]
+fn merged_log_errors_are_terminal_without_exposing_stale_records() -> crate::Result {
+    let old = logs_table(&[(b"refs/a", 9, true), (b"refs/a", 8, true)])?;
+    let first = super::log::record(b"refs/a", 9, true);
+    let mut second = super::log::record(b"refs/a", 8, true);
+    second.pop();
+    let mut encoded = first.clone();
+    encoded.extend(second);
+    let newer = super::log::log_table(&encoded, &[0, first.len()])?;
+    let snapshot = snapshot([("old".into(), old), ("newer".into(), newer)])?;
+    let mut logs = snapshot.logs("refs/a".into())?;
+    assert_eq!(logs.next_record()?.expect("valid newest record").update_index, 9);
+    assert!(logs.next_record().is_err(), "the malformed newer successor is reported");
+    assert!(
+        logs.next_record()?.is_none(),
+        "a terminal error cannot expose the older duplicate"
     );
     Ok(())
 }

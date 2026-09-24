@@ -55,5 +55,7 @@ impl Snapshot {
     }
 }
 
+/// Merged reflog views over immutable snapshots.
+pub mod log;
 /// Merged reference views over immutable snapshots.
 pub mod reference;

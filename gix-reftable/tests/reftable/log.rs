@@ -22,7 +22,7 @@ fn log_key(name: &[u8], index: u64) -> Vec<u8> {
     out
 }
 
-fn record(name: &[u8], index: u64, update: bool) -> Vec<u8> {
+pub(super) fn record(name: &[u8], index: u64, update: bool) -> Vec<u8> {
     let key = log_key(name, index);
     let mut out = vec![0];
     varint(((key.len() as u64) << 3) | u64::from(update), &mut out);
