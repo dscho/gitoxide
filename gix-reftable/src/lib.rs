@@ -1,8 +1,8 @@
-//! Read Git's reftable reference storage format from caller-owned bytes.
+//! Read Git's reftable reference storage format.
 //!
-//! [`Table::from_bytes()`] validates the table envelope before its offsets are used.
-//! Repository configuration, reference policy, and stack management are separate
-//! concerns and are not handled here.
+//! [`Table::from_bytes()`] borrows one encoded table, while [`stack::Snapshot`]
+//! owns immutable table bytes for merged reads. Repository configuration and
+//! reference policy remain separate concerns.
 #![deny(missing_docs, unsafe_code)]
 
 /// Byte-string types used for reference names and record data.
@@ -79,6 +79,8 @@ pub mod log;
 pub mod object;
 /// Reference records and their reusable read cursor.
 pub mod reference;
+/// Immutable table stacks and their merged views.
+pub mod stack;
 
 mod block;
 mod decode;
