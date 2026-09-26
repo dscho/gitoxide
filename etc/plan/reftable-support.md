@@ -400,6 +400,15 @@ our writer can supply self-confirming fixtures.
 > development process, not only formatting. No implementation or commit passes
 > without satisfying it.
 
+**Status: complete.** The `reftables-task3` topic was integrated by merge
+`2460d8065`. `gix-reftable` now provides owned, immutable snapshots over
+caller-independent table bytes. Merged reference and reflog views use
+newer-table precedence and tombstone suppression; reference lookup and prefix
+iteration are covered. Directory-backed stacks load byte-oriented `tables.list`
+names and retry boundedly only for missing-table races during concurrent
+publication or compaction. Native table writing and stack transactions remain
+Task 4.
+
 Use existing explicit state/buffer ownership and borrowed file views as
 precedents; do not start with a monolithic shared mutable repository object.
 Test merged records against a small in-memory model before adding filesystem
