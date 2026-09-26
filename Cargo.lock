@@ -2461,6 +2461,7 @@ dependencies = [
  "gix-actor",
  "gix-error",
  "gix-hash",
+ "gix-path",
  "gix-testtools",
  "gix-zlib",
 ]

@@ -38,3 +38,4 @@ mod log;
 mod object;
 mod oracle;
 mod reference;
+mod stack;

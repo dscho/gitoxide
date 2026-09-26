@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 gix-reftable = { path = "..", features = ["sha1", "sha256"] }
+gix-hash = { path = "../../gix-hash", features = ["sha1", "sha256"] }
 
 [workspace]
 members = ["."]
@@ -20,5 +21,11 @@ debug = 1
 [[bin]]
 name = "table"
 path = "fuzz_targets/table.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "snapshot"
+path = "fuzz_targets/snapshot.rs"
 test = false
 doc = false
