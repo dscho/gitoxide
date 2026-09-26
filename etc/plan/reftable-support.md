@@ -370,6 +370,11 @@ a generalized test framework or a production Git-subprocess backend.
 > development process, not only formatting. No implementation or commit passes
 > without satisfying it.
 
+**Status: complete.** The `reftables-task2` topic was integrated by merge
+`988be1cb1`. `gix-reftable` now validates and reads single-table envelopes,
+reference records, compressed reflogs, reverse object records, restart tables,
+and all index types for SHA-1 and SHA-256. Stack merging remains Task 3.
+
 Use [borrowed object views][object-types], [validated file construction][graph-init],
 and [low-level compression with thin adapters][compression] as precedents.
 Implement the native `gix-reftable` crate using workspace conventions, starting
