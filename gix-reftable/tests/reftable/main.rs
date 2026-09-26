@@ -39,3 +39,4 @@ mod object;
 mod oracle;
 mod reference;
 mod stack;
+mod write;
