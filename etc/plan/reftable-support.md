@@ -406,8 +406,7 @@ caller-independent table bytes. Merged reference and reflog views use
 newer-table precedence and tombstone suppression; reference lookup and prefix
 iteration are covered. Directory-backed stacks load byte-oriented `tables.list`
 names and retry boundedly only for missing-table races during concurrent
-publication or compaction. Native table writing and stack transactions remain
-Task 4.
+publication or compaction.
 
 Use existing explicit state/buffer ownership and borrowed file views as
 precedents; do not start with a monolithic shared mutable repository object.
@@ -430,6 +429,13 @@ Owned state is justified by its lifecycle, not forbidden or introduced by habit.
 > before and throughout this task. Imitate gitoxide's programming paradigms and
 > development process, not only formatting. No implementation or commit passes
 > without satisfying it.
+
+**Status: complete.** The `reftables-task4` topic was integrated by merge
+`fd8371313`. `gix-reftable` now streams SHA-1/SHA-256 reference and compressed
+reflog tables with indexes. Locked stacks reload before validating changes,
+then publish complete tables atomically with durability and rollback. Git reads
+the resulting refs and logs; compaction remains Task 5 and `gix-ref` policy
+belongs to Task 6.
 
 Use [planned streaming writes][chunk-write], existing lock/tempfile facilities,
 and the native record/stack APIs as precedents. Avoid a second generic I/O or
