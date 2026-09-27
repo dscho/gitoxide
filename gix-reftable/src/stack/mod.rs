@@ -18,16 +18,28 @@ pub struct Stack {
     options: Options,
 }
 
-/// Options controlling stack snapshot loading.
+/// A manifest lock holding the current, immutable stack snapshot.
+#[must_use = "Dropping the lock releases it without publishing changes"]
+pub struct Locked {
+    _lock: gix_lock::File,
+    snapshot: Snapshot,
+}
+
+/// Options controlling stack access.
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
     /// Maximum attempts to recover when concurrent publication removes a listed table.
     pub max_reload_attempts: usize,
+    /// Git's parsed sharing permissions, or zero to keep the process umask.
+    pub shared_repository_permissions: i32,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { max_reload_attempts: 3 }
+        Options {
+            max_reload_attempts: 3,
+            shared_repository_permissions: 0,
+        }
     }
 }
 
@@ -83,7 +95,7 @@ impl Stack {
         Stack::at_opts(directory, object_hash, Options::default())
     }
 
-    /// Create a stack handle with explicit loading `options`.
+    /// Create a stack handle with explicit `options`.
     pub fn at_opts(directory: impl Into<PathBuf>, object_hash: gix_hash::Kind, options: Options) -> Self {
         Stack {
             directory: directory.into(),
@@ -103,4 +115,5 @@ pub mod log;
 /// Merged reference views over immutable snapshots.
 pub mod reference;
 
+mod append;
 mod init;
