@@ -190,6 +190,25 @@ mod snapshot {
         }
         Ok(())
     }
+
+    #[test]
+    fn snapshots_select_reftable_sizes_without_decoding_records() -> TestResult {
+        let bytes = Writer::new(Vec::new(), crate::write::header())?.finish()?;
+        let snapshot = Snapshot::from_tables(
+            gix_testtools::object_hash(),
+            (0..4).map(|index| (format!("{index}.ref").into(), bytes.clone())),
+        )?;
+        assert_eq!(
+            snapshot.geometric_range(2)?,
+            Some(0..4),
+            "equal-size tables form one compaction segment"
+        );
+        assert!(
+            snapshot.geometric_range(1).is_err(),
+            "invalid factors are explicit errors"
+        );
+        Ok(())
+    }
 }
 
 pub(super) fn append(stack: &Stack, name: &BStr, value: Option<u8>, log_index: u64) -> crate::Result {

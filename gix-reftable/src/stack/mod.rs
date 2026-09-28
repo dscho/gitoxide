@@ -125,3 +125,4 @@ pub use compact::{CompactionOptions, TableRange};
 mod append;
 mod compact;
 mod init;
+mod selection;
