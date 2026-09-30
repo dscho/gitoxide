@@ -434,8 +434,7 @@ Owned state is justified by its lifecycle, not forbidden or introduced by habit.
 `fd8371313`. `gix-reftable` now streams SHA-1/SHA-256 reference and compressed
 reflog tables with indexes. Locked stacks reload before validating changes,
 then publish complete tables atomically with durability and rollback. Git reads
-the resulting refs and logs; compaction remains Task 5 and `gix-ref` policy
-belongs to Task 6.
+the resulting refs and logs. `gix-ref` policy belongs to Task 6.
 
 Use [planned streaming writes][chunk-write], existing lock/tempfile facilities,
 and the native record/stack APIs as precedents. Avoid a second generic I/O or
@@ -462,6 +461,14 @@ Review cuts: table writer, append publication, then stack transaction guarantees
 > before and throughout this task. Imitate gitoxide's programming paradigms and
 > development process, not only formatting. No implementation or commit passes
 > without satisfying it.
+
+**Status: complete.** The `reftables-task5` code topic was integrated by merge
+`2e59bb5b2`. `gix-reftable` now compacts full and partial ranges, preserving
+masking tombstones and revalidating selected table names under the manifest
+lock. Caller-driven geometric maintenance bounds stack depth; reflog retention,
+progress, and interruption remain explicit caller choices. Stale-table cleanup
+reports deferred deletion failures for later retry. `gix-ref` integration
+remains Task 6.
 
 Reuse stack merging and writer primitives, with explicit progress/interruption
 and options where appropriate. Do not copy Git's C state organization or invent
