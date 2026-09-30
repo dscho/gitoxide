@@ -28,10 +28,10 @@ pub enum Value {
     Symbolic(BString),
 }
 
-struct Current {
-    name: BString,
-    update_index: u64,
-    value: Option<Value>,
+pub(super) struct Current {
+    pub name: BString,
+    pub update_index: u64,
+    pub value: Option<Value>,
 }
 
 struct SubIter<'a> {
@@ -69,7 +69,10 @@ impl Snapshot {
 
 impl<'a> Iter<'a> {
     fn new(snapshot: &'a Snapshot, prefix: Option<BString>) -> Result<Self> {
-        let tables = snapshot.parsed_tables()?;
+        Self::from_tables(snapshot.parsed_tables()?, prefix)
+    }
+
+    pub(super) fn from_tables(tables: Vec<crate::Table<'a>>, prefix: Option<BString>) -> Result<Self> {
         let mut subiters = Vec::with_capacity(tables.len());
         for table in tables {
             let mut iter = table.references();
@@ -89,49 +92,7 @@ impl<'a> Iter<'a> {
 
     /// Return the next visible reference, suppressing overwritten records and tombstones.
     pub fn next_record(&mut self) -> Result<Option<Reference>> {
-        let result = self.advance();
-        if result.is_err() {
-            self.done = true;
-        }
-        result
-    }
-
-    fn advance(&mut self) -> Result<Option<Reference>> {
-        while !self.done {
-            if let Some(index) = self.pending.take() {
-                let sub = &mut self.subiters[index];
-                sub.current = next_owned(&mut sub.iter)?;
-            }
-            let Some((selected, current)) = self
-                .subiters
-                .iter()
-                .enumerate()
-                .filter_map(|(index, sub)| sub.current.as_ref().map(|record| (index, record)))
-                .min_by(|(left_index, left), (right_index, right)| {
-                    left.name.cmp(&right.name).then_with(|| right_index.cmp(left_index))
-                })
-            else {
-                self.done = true;
-                return Ok(None);
-            };
-            if self
-                .prefix
-                .as_ref()
-                .is_some_and(|prefix| !current.name.starts_with(prefix.as_slice()))
-            {
-                self.done = true;
-                return Ok(None);
-            }
-            let current = self.subiters[selected]
-                .current
-                .take()
-                .expect("the selected subiterator has a record");
-            self.pending = Some(selected);
-            for (index, sub) in self.subiters.iter_mut().enumerate() {
-                if index != selected && sub.current.as_ref().is_some_and(|record| record.name == current.name) {
-                    sub.current = next_owned(&mut sub.iter)?;
-                }
-            }
+        while let Some(current) = self.next_stored()? {
             if let Some(value) = current.value {
                 return Ok(Some(Reference {
                     name: current.name,
@@ -141,6 +102,55 @@ impl<'a> Iter<'a> {
             }
         }
         Ok(None)
+    }
+
+    pub(super) fn next_stored(&mut self) -> Result<Option<Current>> {
+        let result = self.advance();
+        if result.is_err() {
+            self.done = true;
+        }
+        result
+    }
+
+    fn advance(&mut self) -> Result<Option<Current>> {
+        if self.done {
+            return Ok(None);
+        }
+        if let Some(index) = self.pending.take() {
+            let sub = &mut self.subiters[index];
+            sub.current = next_owned(&mut sub.iter)?;
+        }
+        let Some((selected, current)) = self
+            .subiters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, sub)| sub.current.as_ref().map(|record| (index, record)))
+            .min_by(|(left_index, left), (right_index, right)| {
+                left.name.cmp(&right.name).then_with(|| right_index.cmp(left_index))
+            })
+        else {
+            self.done = true;
+            return Ok(None);
+        };
+        if self
+            .prefix
+            .as_ref()
+            .is_some_and(|prefix| !current.name.starts_with(prefix.as_slice()))
+        {
+            self.done = true;
+            return Ok(None);
+        }
+        let current = self.subiters[selected]
+            .current
+            .take()
+            .expect("the selected subiterator has a record");
+        self.pending = Some(selected);
+        for (index, sub) in self.subiters.iter_mut().enumerate() {
+            if index != selected && sub.current.as_ref().is_some_and(|record| record.name == current.name) {
+                sub.current = next_owned(&mut sub.iter)?;
+            }
+        }
+        Ok(Some(current))
     }
 }
 

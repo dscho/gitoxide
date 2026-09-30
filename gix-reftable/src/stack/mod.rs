@@ -79,7 +79,11 @@ impl Snapshot {
     }
 
     fn parsed_tables(&self) -> Result<Vec<Table<'_>>> {
-        self.tables
+        self.parsed_range(0..self.tables.len())
+    }
+
+    fn parsed_range(&self, range: std::ops::Range<usize>) -> Result<Vec<Table<'_>>> {
+        self.tables[range]
             .iter()
             .map(|table| {
                 Table::from_bytes(&table.data)
@@ -110,10 +114,16 @@ impl Stack {
     }
 }
 
+/// Cleanup results for unlisted table files.
+pub mod cleanup;
 /// Merged reflog views over immutable snapshots.
 pub mod log;
 /// Merged reference views over immutable snapshots.
 pub mod reference;
+pub use compact::{CompactionOptions, LogRetention, TableRange};
+pub use selection::MaintenanceOptions;
 
 mod append;
+mod compact;
 mod init;
+mod selection;

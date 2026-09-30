@@ -29,7 +29,7 @@ gix-error = { version = "^0.5.2", path = "../gix-error" }
 gix-hash = { version = "^0.28.1", path = "../gix-hash" }
 gix-lock = { version = "^27.0.0", path = "../gix-lock" }
 gix-path = { version = "^0.14.1", path = "../gix-path" }
-gix-utils = { version = "^0.5.2", path = "../gix-utils" }
+gix-utils = { version = "^0.5.2", path = "../gix-utils", features = ["progress"] }
 gix-zlib = { version = "^0.4.0", path = "../gix-zlib" }
 
 [dev-dependencies]

@@ -6,7 +6,7 @@ use gix_reftable::{
 };
 use gix_testtools::bstr::{BStr, ByteSlice};
 
-fn next_header(index: u64) -> Header {
+pub(super) fn next_header(index: u64) -> Header {
     let mut header = super::write::header();
     header.min_update_index = index;
     header.max_update_index = index;

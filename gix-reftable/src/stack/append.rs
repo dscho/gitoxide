@@ -1,4 +1,7 @@
-use std::io::{self, Read, Seek, Write};
+use std::{
+    io::{self, Read, Seek, Write},
+    ops::Range,
+};
 
 use bstr::{BString, ByteSlice};
 use gix_error::{ErrorExt, OptionExt, Result, ResultExt, bail, conflict, message, validation};
@@ -58,19 +61,45 @@ impl Locked {
     }
 
     fn append_with(
-        mut self,
+        self,
         header: Header,
         write: impl FnOnce(&mut Writer<&mut dyn Write>) -> Result<()>,
         sync_table: impl FnOnce(&std::fs::File) -> io::Result<()>,
         sync_manifest: impl FnOnce(&std::fs::File) -> io::Result<()>,
     ) -> Result<Snapshot> {
-        if header.object_hash != self.snapshot.object_hash {
-            bail!(validation("The appended table uses a different object-hash kind"));
-        }
         if header.min_update_index < self.next_update_index()? {
             bail!(conflict(
                 "The appended table overlaps the locked stack's update indices"
             ));
+        }
+        let end = self.snapshot.tables.len();
+        self.publish_with(
+            end..end,
+            header,
+            |_, out| {
+                let mut writer = Writer::new(out, header)?;
+                write(&mut writer)?;
+                writer.finish()?;
+                Ok(())
+            },
+            sync_table,
+            sync_manifest,
+        )
+    }
+
+    pub(super) fn publish_with(
+        mut self,
+        range: Range<usize>,
+        header: Header,
+        write: impl FnOnce(&Snapshot, &mut dyn Write) -> Result<()>,
+        sync_table: impl FnOnce(&std::fs::File) -> io::Result<()>,
+        sync_manifest: impl FnOnce(&std::fs::File) -> io::Result<()>,
+    ) -> Result<Snapshot> {
+        if range.start > range.end || range.end > self.snapshot.tables.len() {
+            bail!(validation("Publication range is outside the locked stack"));
+        }
+        if header.object_hash != self.snapshot.object_hash {
+            bail!(validation("The new table uses a different object-hash kind"));
         }
         let directory = self._lock.resource_path();
         let directory = directory.parent().expect("tables.list is within a stack directory");
@@ -88,11 +117,7 @@ impl Locked {
             .with_mut(|file| file.as_file_mut().set_permissions(permissions))
             .and_then(std::convert::identity)
             .or_raise(|| message!("Could not set permissions for the new reftable"))?;
-        {
-            let mut writer = Writer::new(&mut tempfile as &mut dyn Write, header)?;
-            write(&mut writer)?;
-            writer.finish()?;
-        }
+        write(&self.snapshot, &mut tempfile as &mut dyn Write)?;
         tempfile
             .with_mut(|file| sync_table(file.as_file()))
             .and_then(std::convert::identity)
@@ -110,36 +135,49 @@ impl Locked {
         if table.header() != &header {
             bail!("The newly written reftable does not match its header");
         }
-        if bytes.len() == header.version.header_len() + header.version.footer_len() {
+        let empty = bytes.len() == header.version.header_len() + header.version.footer_len();
+        if empty && range.is_empty() {
             bail!(validation("Cannot append an empty reftable"));
         }
-        let unique = gix_utils::rng::usize(..=u32::MAX as usize);
-        let name = format!(
-            "0x{:012x}-0x{:012x}-{unique:08x}.ref",
-            header.min_update_index, header.max_update_index
-        );
-        let table_path = directory.join(&name);
-        match std::fs::symlink_metadata(&table_path) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.and_raise(message!("Could not check {}", table_path.display()))),
-            Ok(_) => bail!("Reftable {} already exists".conflict(), table_path.display()),
-        }
-        self.snapshot.tables.push(TableData {
-            name: BString::from(name),
-            data: bytes,
-        });
-        match tempfile
-            .persist(&table_path)
-            .or_raise(|| message!("Could not publish reftable {}", table_path.display()))?
-        {
-            Some(file) => drop(file),
-            None => bail!("Reftable {} vanished before publication", table_path.display()),
-        }
+        let (replacement, table_path) = if empty {
+            drop(tempfile);
+            (None, None)
+        } else {
+            let unique = gix_utils::rng::usize(..=u32::MAX as usize);
+            let name = format!(
+                "0x{:012x}-0x{:012x}-{unique:08x}.ref",
+                header.min_update_index, header.max_update_index
+            );
+            let table_path = directory.join(&name);
+            match std::fs::symlink_metadata(&table_path) {
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.and_raise(message!("Could not check {}", table_path.display()))),
+                Ok(_) => bail!("Reftable {} already exists".conflict(), table_path.display()),
+            }
+            match tempfile
+                .persist(&table_path)
+                .or_raise(|| message!("Could not publish reftable {}", table_path.display()))?
+            {
+                Some(file) => drop(file),
+                None => bail!("Reftable {} vanished before publication", table_path.display()),
+            }
+            (
+                Some(TableData {
+                    name: BString::from(name),
+                    data: bytes,
+                }),
+                Some(table_path),
+            )
+        };
 
         let result = (|| -> Result<()> {
-            for name in self.snapshot.table_names() {
+            for table in self.snapshot.tables[..range.start]
+                .iter()
+                .chain(replacement.iter())
+                .chain(self.snapshot.tables[range.end..].iter())
+            {
                 self._lock
-                    .write_all(name.as_bytes())
+                    .write_all(table.name.as_bytes())
                     .and_then(|()| self._lock.write_all(b"\n"))
                     .or_raise(|| message!("Could not update {}", self._lock.lock_path().display()))?;
             }
@@ -155,10 +193,15 @@ impl Locked {
             Ok(())
         })();
         match result {
-            Ok(()) => Ok(self.snapshot),
+            Ok(()) => {
+                self.snapshot.tables.splice(range, replacement);
+                Ok(self.snapshot)
+            }
             Err(err) => {
-                std::fs::remove_file(&table_path)
-                    .or_raise(|| message!("Could not remove unpublished {} after {err}", table_path.display()))?;
+                if let Some(table_path) = table_path {
+                    std::fs::remove_file(&table_path)
+                        .or_raise(|| message!("Could not remove unpublished {} after {err}", table_path.display()))?;
+                }
                 Err(err)
             }
         }
