@@ -3,7 +3,7 @@ use gix_reftable::stack::{
     Snapshot,
     reference::{Iter, Value},
 };
-use gix_testtools::bstr::BString;
+use gix_testtools::bstr::{BString, ByteSlice};
 
 fn ref_record(name: &[u8], value: Option<u8>) -> Vec<u8> {
     let mut record = vec![0];
@@ -177,5 +177,51 @@ fn merged_log_errors_are_terminal_without_exposing_stale_records() -> crate::Res
         logs.next_record()?.is_none(),
         "a terminal error cannot expose the older duplicate"
     );
+    Ok(())
+}
+
+#[test]
+fn directory_stacks_load_git_tables_in_manifest_order() -> crate::Result {
+    let reftable = super::fixture()?.join("reftable/repo/.git/reftable");
+    let expected_names = std::fs::read_to_string(reftable.join("tables.list"))?
+        .lines()
+        .map(BString::from)
+        .collect::<Vec<_>>();
+    let stack = gix_reftable::stack::Stack::at(&reftable, gix_testtools::object_hash());
+    let snapshot = stack.snapshot()?;
+    assert_eq!(stack.directory(), reftable);
+    assert_eq!(snapshot.table_names().collect::<Vec<_>>(), expected_names);
+
+    let expected = super::baseline("files", "refs")?;
+    let references = snapshot.references_prefixed("refs/".into())?;
+    let names = reference_names(references)?;
+    assert_eq!(
+        names,
+        expected.lines().collect::<Vec<_>>(),
+        "the merged native view agrees with Git"
+    );
+    Ok(())
+}
+
+#[test]
+fn old_snapshot_cursors_survive_later_stack_reloads() -> crate::Result {
+    let dir = gix_testtools::tempfile::TempDir::new()?;
+    std::fs::write(dir.path().join("old.ref"), refs_table(&[(b"refs/a", Some(1))]))?;
+    std::fs::write(dir.path().join("tables.list"), b"old.ref\n")?;
+    let stack = gix_reftable::stack::Stack::at(dir.path(), gix_testtools::object_hash());
+    let old_snapshot = stack.snapshot()?;
+    let mut old_references = old_snapshot.references()?;
+
+    std::fs::write(dir.path().join("new.ref"), refs_table(&[(b"refs/a", Some(2))]))?;
+    std::fs::write(dir.path().join("tables.list"), b"old.ref\nnew.ref\n")?;
+    let new_snapshot = stack.snapshot()?;
+
+    let old = old_references
+        .next_record()?
+        .expect("the old snapshot retains its table bytes");
+    let new = new_snapshot
+        .try_find_reference("refs/a".into())?
+        .expect("the reloaded snapshot sees the appended table");
+    assert_ne!(old.value, new.value, "new snapshots do not mutate existing cursors");
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Read Git's reftable reference storage format.
 //!
-//! [`Table::from_bytes()`] borrows one encoded table, while [`stack::Snapshot`]
-//! owns immutable table bytes for merged reads. Repository configuration and
+//! [`Table::from_bytes()`] borrows one encoded table, while [`stack::Stack`]
+//! loads immutable snapshots from `tables.list`. Repository configuration and
 //! reference policy remain separate concerns.
 #![deny(missing_docs, unsafe_code)]
 

@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use bstr::BString;
 use gix_error::{Result, ResultExt, bail, message};
 
@@ -7,6 +9,26 @@ use crate::Table;
 pub struct Snapshot {
     object_hash: gix_hash::Kind,
     tables: Vec<TableData>,
+}
+
+/// A directory-backed reftable stack.
+pub struct Stack {
+    directory: PathBuf,
+    object_hash: gix_hash::Kind,
+    options: Options,
+}
+
+/// Options controlling stack snapshot loading.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// Maximum attempts to recover when concurrent publication removes a listed table.
+    pub max_reload_attempts: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { max_reload_attempts: 3 }
+    }
 }
 
 struct TableData {
@@ -55,7 +77,30 @@ impl Snapshot {
     }
 }
 
+impl Stack {
+    /// Create a stack handle at `directory` for tables using `object_hash`.
+    pub fn at(directory: impl Into<PathBuf>, object_hash: gix_hash::Kind) -> Self {
+        Stack::at_opts(directory, object_hash, Options::default())
+    }
+
+    /// Create a stack handle with explicit loading `options`.
+    pub fn at_opts(directory: impl Into<PathBuf>, object_hash: gix_hash::Kind, options: Options) -> Self {
+        Stack {
+            directory: directory.into(),
+            object_hash,
+            options,
+        }
+    }
+
+    /// Return the directory containing `tables.list` and immutable table files.
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+}
+
 /// Merged reflog views over immutable snapshots.
 pub mod log;
 /// Merged reference views over immutable snapshots.
 pub mod reference;
+
+mod init;
