@@ -192,7 +192,7 @@ mod snapshot {
     }
 }
 
-fn append(stack: &Stack, name: &BStr, value: Option<u8>, log_index: u64) -> crate::Result {
+pub(super) fn append(stack: &Stack, name: &BStr, value: Option<u8>, log_index: u64) -> crate::Result {
     let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
     let index = locked.next_update_index()?;
     let object_id = value
@@ -227,7 +227,7 @@ fn append(stack: &Stack, name: &BStr, value: Option<u8>, log_index: u64) -> crat
     Ok(())
 }
 
-fn compact(stack: &Stack, range: std::ops::Range<usize>) -> crate::Result<Snapshot> {
+pub(super) fn compact(stack: &Stack, range: std::ops::Range<usize>) -> crate::Result<Snapshot> {
     let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
     let selection = locked.snapshot().select_tables(range)?;
     Ok(locked.compact(selection, CompactionOptions { block_size: 0 })?)

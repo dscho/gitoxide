@@ -114,6 +114,8 @@ impl Stack {
     }
 }
 
+/// Cleanup results for unlisted table files.
+pub mod cleanup;
 /// Merged reflog views over immutable snapshots.
 pub mod log;
 /// Merged reference views over immutable snapshots.

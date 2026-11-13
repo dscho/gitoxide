@@ -34,6 +34,7 @@ fn table_paths() -> Result<Vec<PathBuf>> {
 }
 
 mod append;
+mod cleanup;
 mod compact;
 mod envelope;
 mod log;
