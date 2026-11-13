@@ -33,6 +33,7 @@ fn table_paths() -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+mod append;
 mod envelope;
 mod log;
 mod object;

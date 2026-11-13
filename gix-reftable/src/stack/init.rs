@@ -221,9 +221,16 @@ mod tests {
             }
         };
         assert!(
-            Stack::at_opts("/stack", gix_hash::Kind::Sha1, Options { max_reload_attempts: 2 },)
-                .snapshot_with(&mut read)
-                .is_err_and(|err| err.is_retryable()),
+            Stack::at_opts(
+                "/stack",
+                gix_hash::Kind::Sha1,
+                Options {
+                    max_reload_attempts: 2,
+                    ..Default::default()
+                },
+            )
+            .snapshot_with(&mut read)
+            .is_err_and(|err| err.is_retryable()),
             "manifest churn can be retried without changing the request"
         );
         assert_eq!(generation, 4, "two attempts read the manifest twice");
