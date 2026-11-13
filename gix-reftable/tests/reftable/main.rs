@@ -25,4 +25,13 @@ fn git_layouts() -> impl Iterator<Item = &'static str> {
         .filter(|layout| *layout != "reftable" || *gix_testtools::GIT_VERSION >= (2, 45, 0))
 }
 
+fn table_paths() -> Result<Vec<PathBuf>> {
+    let directory = fixture()?.join("reftable/repo/.git/reftable");
+    Ok(std::fs::read_to_string(directory.join("tables.list"))?
+        .lines()
+        .map(|name| directory.join(name))
+        .collect())
+}
+
+mod envelope;
 mod oracle;
