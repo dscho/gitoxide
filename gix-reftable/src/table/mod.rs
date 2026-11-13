@@ -58,6 +58,14 @@ impl<'a> Table<'a> {
         (self.footer.objects != 0).then_some(self.footer.objects)
     }
 
+    pub(crate) fn logs_end(&self) -> usize {
+        self.body_end()
+    }
+
+    pub(crate) fn log_index_start(&self) -> Option<usize> {
+        (self.footer.log_index != 0).then_some(self.footer.log_index)
+    }
+
     pub(crate) fn header_skip(&self, block_offset: usize) -> usize {
         if block_offset == 0 {
             self.header.version.header_len()

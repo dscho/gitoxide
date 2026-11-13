@@ -76,6 +76,10 @@ impl Block {
         }
     }
 
+    pub fn is_done(self, position: Position) -> bool {
+        position.offset == self.records_end
+    }
+
     fn restart_offset(self, data: &[u8], index: usize) -> usize {
         let pos = self.records_end + 3 * index;
         u32::from_be_bytes([0, data[pos], data[pos + 1], data[pos + 2]]) as usize

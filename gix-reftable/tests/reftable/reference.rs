@@ -4,6 +4,13 @@ use gix_reftable::{Table, reference::ValueRef};
 use gix_testtools::bstr::{BStr, ByteSlice};
 
 pub(super) fn table_with_records(records: &[u8], restarts: &[usize]) -> Vec<u8> {
+    let mut data = empty_table();
+    let header_len = if data[4] == 1 { 24 } else { 28 };
+    data.splice(header_len..header_len, block(b'r', header_len, records, restarts));
+    data
+}
+
+pub(super) fn empty_table() -> Vec<u8> {
     let (version, hash) = if gix_testtools::object_hash().len_in_bytes() == 20 {
         (1, b"sha1")
     } else {
@@ -15,7 +22,6 @@ pub(super) fn table_with_records(records: &[u8], restarts: &[usize]) -> Vec<u8> 
         data[base + 8..base + 16].copy_from_slice(&7_u64.to_be_bytes());
         data[base + 16..base + 24].copy_from_slice(&10_u64.to_be_bytes());
     }
-    data.splice(header_len..header_len, block(b'r', header_len, records, restarts));
     super::envelope::update_checksum(&mut data);
     data
 }
@@ -31,6 +37,14 @@ pub(super) fn block(kind: u8, header_skip: usize, records: &[u8], restarts: &[us
     }
     block.extend_from_slice(&u16::try_from(restarts.len()).expect("few test restarts").to_be_bytes());
     block
+}
+
+pub(super) fn index_record(name: &[u8], offset: usize) -> Vec<u8> {
+    let mut record = vec![0];
+    super::log::varint((name.len() as u64) << 3, &mut record);
+    record.extend_from_slice(name);
+    super::log::varint(offset as u64, &mut record);
+    record
 }
 
 fn object_record() -> Vec<u8> {

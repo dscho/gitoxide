@@ -9,5 +9,9 @@ fuzz_target!(|data: &[u8]| {
         while let Ok(Some(reference)) = references.next_record() {
             _ = black_box(reference);
         }
+        let mut logs = table.logs();
+        while let Ok(Some(log)) = logs.next_record() {
+            _ = black_box(log);
+        }
     }
 });

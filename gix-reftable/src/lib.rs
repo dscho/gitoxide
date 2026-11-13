@@ -51,6 +51,19 @@ pub struct ReferenceRef<'a> {
     pub value: reference::ValueRef<'a>,
 }
 
+/// A decoded reflog record borrowing its cursor's key and inflated block buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogRef<'a> {
+    /// The complete reference name.
+    pub name: &'a bstr::BStr,
+    /// The transaction index, with newer entries sorting before older entries.
+    pub update_index: u64,
+    /// The reflog data, or `None` for a tombstone.
+    pub data: Option<log::DataRef<'a>>,
+}
+
+/// Reflog records and their reusable read cursor.
+pub mod log;
 /// Reference records and their reusable read cursor.
 pub mod reference;
 

@@ -2458,9 +2458,11 @@ version = "0.1.0"
 dependencies = [
  "bstr",
  "crc32fast",
+ "gix-actor",
  "gix-error",
  "gix-hash",
  "gix-testtools",
+ "gix-zlib",
 ]
 
 [[package]]
