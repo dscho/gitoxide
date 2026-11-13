@@ -2,7 +2,7 @@ use gix_reftable::{
     LogRef, ReferenceRef, Table,
     log::DataRef,
     reference::ValueRef,
-    stack::{CompactionOptions, Snapshot, Stack},
+    stack::{CompactionOptions, LogRetention, Snapshot, Stack},
 };
 use gix_testtools::bstr::{BStr, ByteSlice};
 
@@ -16,7 +16,7 @@ mod snapshot {
         Header, LogRef, ReferenceRef, Table,
         log::DataRef,
         reference::ValueRef,
-        stack::{CompactionOptions, Snapshot, log, reference},
+        stack::{CompactionOptions, LogRetention, Snapshot, log, reference},
         write::Writer,
     };
 
@@ -70,7 +70,14 @@ mod snapshot {
     }
 
     fn compact(snapshot: &Snapshot, range: Range<usize>) -> TestResult<(Vec<u8>, usize)> {
-        Ok(snapshot.compact_into(range, Vec::new(), CompactionOptions { block_size: 0 })?)
+        Ok(snapshot.compact_into(
+            range,
+            Vec::new(),
+            CompactionOptions {
+                block_size: 0,
+                ..Default::default()
+            },
+        )?)
     }
 
     fn references(snapshot: &Snapshot) -> TestResult<Vec<reference::Reference>> {
@@ -179,6 +186,82 @@ mod snapshot {
     }
 
     #[test]
+    fn full_retention_filters_logs_by_time_and_update_index() -> TestResult {
+        let tables = [1, 2, 3]
+            .into_iter()
+            .map(|index| {
+                let name = format!("refs/{index}");
+                table(
+                    index,
+                    &[(name.as_bytes(), Some(index as u8))],
+                    &[(name.as_bytes(), index, true)],
+                )
+            })
+            .collect::<TestResult<Vec<_>>>()?;
+        let snapshot = Snapshot::from_tables(gix_testtools::object_hash(), tables)?;
+        let (bytes, count) = snapshot.compact_into(
+            0..3,
+            Vec::new(),
+            CompactionOptions {
+                log_retention: LogRetention {
+                    min_update_index: Some(2),
+                    min_time_seconds: Some(3),
+                },
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(count, 4, "all refs but only the newest log survive");
+        let table = Table::from_bytes(&bytes)?;
+        let mut logs = table.logs();
+        let record = logs.next_record()?.expect("the unexpired log remains");
+        assert_eq!(record.name, "refs/3");
+        assert_eq!(record.update_index, 3);
+        assert!(
+            logs.next_record()?.is_none(),
+            "expired logs do not appear in the output"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn partial_expiry_creates_a_tombstone_to_prevent_log_resurrection() -> TestResult {
+        let lower = table(1, &[(b"refs/a", Some(1))], &[(b"refs/a", 1, true)])?;
+        let upper = table(2, &[(b"refs/a", None)], &[(b"refs/a", 1, true)])?;
+        let snapshot = Snapshot::from_tables(gix_testtools::object_hash(), [lower.clone(), upper])?;
+        let (bytes, count) = snapshot.compact_into(
+            1..2,
+            Vec::new(),
+            CompactionOptions {
+                log_retention: LogRetention {
+                    min_update_index: Some(2),
+                    min_time_seconds: None,
+                },
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(count, 2, "reference and reflog tombstones mask the lower table");
+        assert!(
+            Table::from_bytes(&bytes)?
+                .logs()
+                .next_record()?
+                .expect("reflog tombstone")
+                .data
+                .is_none(),
+            "an expired update must be replaced by a deletion"
+        );
+        let after = Snapshot::from_tables(gix_testtools::object_hash(), [lower, ("merged".into(), bytes)])?;
+        assert!(
+            after.logs(BStr::new(b"refs/a"))?.next_record()?.is_none(),
+            "old logs stay hidden"
+        );
+        assert!(
+            after.try_find_reference(BStr::new(b"refs/a"))?.is_none(),
+            "the ref stays deleted"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn invalid_ranges_are_rejected() -> TestResult {
         let only = table(1, &[(b"refs/a", Some(1))], &[])?;
         let snapshot = Snapshot::from_tables(gix_testtools::object_hash(), [only])?;
@@ -249,7 +332,13 @@ pub(super) fn append(stack: &Stack, name: &BStr, value: Option<u8>, log_index: u
 pub(super) fn compact(stack: &Stack, range: std::ops::Range<usize>) -> crate::Result<Snapshot> {
     let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
     let selection = locked.snapshot().select_tables(range)?;
-    Ok(locked.compact(selection, CompactionOptions { block_size: 0 })?)
+    Ok(locked.compact(
+        selection,
+        CompactionOptions {
+            block_size: 0,
+            ..Default::default()
+        },
+    )?)
 }
 
 #[test]
@@ -315,6 +404,115 @@ fn partial_compaction_keeps_tombstones_below_an_unmodified_table() -> crate::Res
     assert!(
         before.try_find_reference(BStr::new(b"refs/c"))?.is_some(),
         "existing readers keep their old snapshot"
+    );
+    Ok(())
+}
+
+#[test]
+fn partial_expiry_does_not_restore_a_lower_reflog_after_cleanup() -> crate::Result {
+    let dir = gix_testtools::tempfile::TempDir::new()?;
+    let stack = Stack::at(dir.path(), gix_testtools::object_hash());
+    let name = BStr::new(b"refs/a");
+    append(&stack, name, Some(1), 1)?;
+    append(&stack, name, Some(2), 1)?;
+    let previous = stack.snapshot()?;
+    assert!(
+        previous.logs(name)?.next_record()?.is_some(),
+        "the upper log is visible before expiration"
+    );
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    let selection = locked.snapshot().select_tables(1..2)?;
+    let current = locked.compact(
+        selection,
+        CompactionOptions {
+            log_retention: LogRetention {
+                min_update_index: None,
+                min_time_seconds: Some(3),
+            },
+            ..Default::default()
+        },
+    )?;
+    assert!(
+        current.logs(name)?.next_record()?.is_none(),
+        "an expired upper log cannot expose its lower duplicate"
+    );
+    let compacted = current.table_names().last().expect("replacement");
+    let bytes = std::fs::read(dir.path().join(gix_path::from_byte_slice(compacted.as_bytes())?))?;
+    assert!(
+        Table::from_bytes(&bytes)?
+            .logs()
+            .next_record()?
+            .expect("tombstone")
+            .data
+            .is_none(),
+        "partial expiry writes a masking tombstone"
+    );
+    let cleaned = stack.cleanup_stale_tables(gix_lock::acquire::Fail::Immediately)?;
+    assert!(cleaned.deferred.is_empty(), "unlisted files can be deleted");
+    assert!(
+        stack.snapshot()?.logs(name)?.next_record()?.is_none(),
+        "cleanup cannot resurrect the log"
+    );
+    assert!(
+        previous.logs(name)?.next_record()?.is_some(),
+        "older snapshots remain immutable"
+    );
+    Ok(())
+}
+
+#[test]
+fn full_expiry_can_publish_an_empty_log_only_stack() -> crate::Result {
+    let dir = gix_testtools::tempfile::TempDir::new()?;
+    let stack = Stack::at(dir.path(), gix_testtools::object_hash());
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    let index = locked.next_update_index()?;
+    let null_id = gix_testtools::object_hash().null();
+    let name = BStr::new(b"refs/heads/log-only");
+    locked.append(super::append::next_header(index), |writer| {
+        writer.push_log(LogRef {
+            name,
+            update_index: index,
+            data: Some(DataRef {
+                previous_object_id: null_id.as_ref(),
+                new_object_id: null_id.as_ref(),
+                committer: gix_actor::IdentityRef {
+                    name: BStr::new(b"author"),
+                    email: BStr::new(b"author@example.com"),
+                },
+                time_seconds: 1,
+                timezone_minutes: 0,
+                message: BStr::new(b"expired\n"),
+            }),
+        })
+    })?;
+    let before = stack.snapshot()?;
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    let selection = locked.snapshot().select_tables(0..1)?;
+    let after = locked.compact(
+        selection,
+        CompactionOptions {
+            log_retention: LogRetention {
+                min_update_index: None,
+                min_time_seconds: Some(2),
+            },
+            ..Default::default()
+        },
+    )?;
+    assert!(
+        after.table_names().next().is_none(),
+        "expiry leaves no table to publish"
+    );
+    assert!(
+        std::fs::read(dir.path().join("tables.list"))?.is_empty(),
+        "the manifest is empty"
+    );
+    assert!(
+        stack.snapshot()?.logs(name)?.next_record()?.is_none(),
+        "the log is expired"
+    );
+    assert!(
+        before.logs(name)?.next_record()?.is_some(),
+        "older snapshots remain unchanged"
     );
     Ok(())
 }

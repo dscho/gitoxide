@@ -55,7 +55,10 @@ fn invalid_maintenance_options_report_errors_even_without_tables() -> crate::Res
             ..MaintenanceOptions::default()
         },
         MaintenanceOptions {
-            compaction: CompactionOptions { block_size: 1 << 24 },
+            compaction: CompactionOptions {
+                block_size: 1 << 24,
+                ..Default::default()
+            },
             ..MaintenanceOptions::default()
         },
     ] {

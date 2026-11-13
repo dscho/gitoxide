@@ -14,11 +14,16 @@ use crate::{Header, LogRef, ReferenceRef, Table, log::DataRef, reference::ValueR
 pub struct CompactionOptions {
     /// Alignment of written reference blocks, or zero for unaligned tables.
     pub block_size: u32,
+    /// Reflog expiry limits. The default retains every update.
+    pub log_retention: LogRetention,
 }
 
 impl Default for CompactionOptions {
     fn default() -> Self {
-        CompactionOptions { block_size: 4096 }
+        CompactionOptions {
+            block_size: 4096,
+            log_retention: LogRetention::default(),
+        }
     }
 }
 
@@ -50,6 +55,22 @@ impl TableRange {
     }
 }
 
+/// Caller-supplied, inclusive boundaries for keeping reflog updates.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LogRetention {
+    /// Discard updates whose index is below this value.
+    pub min_update_index: Option<u64>,
+    /// Discard updates whose timestamp in seconds is below this value.
+    pub min_time_seconds: Option<u64>,
+}
+
+impl LogRetention {
+    fn keeps(self, record: &log::Record) -> bool {
+        self.min_update_index.is_none_or(|min| record.update_index >= min)
+            && self.min_time_seconds.is_none_or(|min| record.time_seconds >= min)
+    }
+}
+
 impl Snapshot {
     /// Remember the table identities in `range` for a later locked compaction.
     ///
@@ -77,6 +98,9 @@ impl Snapshot {
     /// Tombstones are retained unless the range begins at the bottom of the
     /// stack. The returned count is zero for an empty replacement table.
     /// Neither the stack nor its manifest is modified.
+    ///
+    /// Partial ranges turn expired logs into tombstones, so entries in lower
+    /// tables cannot reappear. To expire every old log, compact the whole stack.
     pub fn compact_into<W: Write>(
         &self,
         range: Range<usize>,
@@ -109,13 +133,17 @@ impl Snapshot {
         }
         let mut logs = log::Iter::from_tables(tables, None)?;
         while let Some(record) = logs.next_stored()? {
-            if range.start == 0 && record.data.is_none() {
+            let keep = record
+                .data
+                .as_ref()
+                .is_some_and(|data| options.log_retention.keeps(data));
+            if range.start == 0 && !keep {
                 continue;
             }
             writer.push_log(LogRef {
                 name: record.name.as_ref(),
                 update_index: record.update_index,
-                data: record.data.as_ref().map(|data| DataRef {
+                data: record.data.as_ref().filter(|_| keep).map(|data| DataRef {
                     previous_object_id: data.previous_object_id.as_ref(),
                     new_object_id: data.new_object_id.as_ref(),
                     committer: data.committer.to_ref(),
@@ -220,7 +248,10 @@ mod tests {
                 locked
                     .compact_with(
                         selection,
-                        CompactionOptions { block_size: 0 },
+                        CompactionOptions {
+                            block_size: 0,
+                            ..Default::default()
+                        },
                         std::fs::File::sync_all,
                         |file| {
                             assert_eq!(

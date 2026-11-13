@@ -120,7 +120,7 @@ pub mod cleanup;
 pub mod log;
 /// Merged reference views over immutable snapshots.
 pub mod reference;
-pub use compact::{CompactionOptions, TableRange};
+pub use compact::{CompactionOptions, LogRetention, TableRange};
 pub use selection::MaintenanceOptions;
 
 mod append;
