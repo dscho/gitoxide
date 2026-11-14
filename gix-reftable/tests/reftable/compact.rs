@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicBool;
+
 use gix_reftable::{
     LogRef, ReferenceRef, Table,
     log::DataRef,
@@ -5,12 +7,17 @@ use gix_reftable::{
     stack::{CompactionOptions, LogRetention, Snapshot, Stack},
 };
 use gix_testtools::bstr::{BStr, ByteSlice};
+use gix_utils::progress::Discard;
 
 mod snapshot {
-    use std::ops::Range;
+    use std::{
+        ops::Range,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     use bstr::{BStr, BString, ByteSlice};
     use gix_testtools::TestResult;
+    use gix_utils::progress::{Count, Discard};
 
     use gix_reftable::{
         Header, LogRef, ReferenceRef, Table,
@@ -73,6 +80,8 @@ mod snapshot {
         Ok(snapshot.compact_into(
             range,
             Vec::new(),
+            &mut Discard,
+            &AtomicBool::new(false),
             CompactionOptions {
                 block_size: 0,
                 ..Default::default()
@@ -202,6 +211,8 @@ mod snapshot {
         let (bytes, count) = snapshot.compact_into(
             0..3,
             Vec::new(),
+            &mut Discard,
+            &AtomicBool::new(false),
             CompactionOptions {
                 log_retention: LogRetention {
                     min_update_index: Some(2),
@@ -231,6 +242,8 @@ mod snapshot {
         let (bytes, count) = snapshot.compact_into(
             1..2,
             Vec::new(),
+            &mut Discard,
+            &AtomicBool::new(false),
             CompactionOptions {
                 log_retention: LogRetention {
                     min_update_index: Some(2),
@@ -258,6 +271,105 @@ mod snapshot {
             after.try_find_reference(BStr::new(b"refs/a"))?.is_none(),
             "the ref stays deleted"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn progress_counts_written_records_and_interruption_stops_before_output() -> TestResult {
+        let input = table(1, &[(b"refs/a", Some(1))], &[(b"refs/a", 1, true)])?;
+        let snapshot = Snapshot::from_tables(gix_testtools::object_hash(), [input])?;
+        let root = gix_utils::progress::prodash::tree::Root::new();
+        let mut progress = root.add_child("compaction");
+        let counter = progress.counter();
+        let should_interrupt = AtomicBool::new(false);
+        let (_, count) = snapshot.compact_into(
+            0..1,
+            Vec::new(),
+            &mut progress,
+            &should_interrupt,
+            CompactionOptions::default(),
+        )?;
+        assert_eq!(count, 2, "the reference and reflog remain");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            count,
+            "progress tracks only records written"
+        );
+        should_interrupt.store(true, Ordering::Relaxed);
+        let mut out = Vec::new();
+        let error = snapshot
+            .compact_into(
+                0..1,
+                &mut out,
+                &mut Discard,
+                &should_interrupt,
+                CompactionOptions::default(),
+            )
+            .expect_err("a pre-requested interruption aborts compaction");
+        assert!(error.is_cancelled(), "interrupted compaction reports cancellation");
+        assert!(out.is_empty(), "no replacement bytes were written");
+        Ok(())
+    }
+
+    #[test]
+    fn interruption_after_streaming_a_block_does_not_finish_the_table() -> TestResult {
+        struct InterruptOnWrite<'a> {
+            bytes: Vec<u8>,
+            interrupted: &'a AtomicBool,
+        }
+
+        impl std::io::Write for InterruptOnWrite<'_> {
+            fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+                self.interrupted.store(true, Ordering::Relaxed);
+                std::io::Write::write(&mut self.bytes, input)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let header = Header {
+            block_size: 128,
+            min_update_index: 1,
+            max_update_index: 1,
+            ..crate::write::header()
+        };
+        let hash = vec![1; header.object_hash.len_in_bytes()];
+        let object_id = gix_hash::oid::try_from_bytes(&hash)?;
+        let mut writer = Writer::new(Vec::new(), header)?;
+        for index in 0..16 {
+            let name = format!("refs/{index:02}");
+            writer.push_reference(ReferenceRef {
+                name: name.as_bytes().as_bstr(),
+                update_index: 1,
+                value: ValueRef::Object {
+                    object_id,
+                    peeled_id: None,
+                },
+            })?;
+        }
+        let snapshot = Snapshot::from_tables(gix_testtools::object_hash(), [("input".into(), writer.finish()?)])?;
+        let should_interrupt = AtomicBool::new(false);
+        let mut output = InterruptOnWrite {
+            bytes: Vec::new(),
+            interrupted: &should_interrupt,
+        };
+        let error = snapshot
+            .compact_into(
+                0..1,
+                &mut output,
+                &mut Discard,
+                &should_interrupt,
+                CompactionOptions {
+                    block_size: 128,
+                    ..Default::default()
+                },
+            )
+            .err()
+            .expect("the output requests interruption before the next record");
+        assert!(error.is_cancelled(), "the operation reports cancellation");
+        assert_eq!(output.bytes.len(), 128, "only the first aligned block was written");
         Ok(())
     }
 
@@ -334,6 +446,8 @@ pub(super) fn compact(stack: &Stack, range: std::ops::Range<usize>) -> crate::Re
     let selection = locked.snapshot().select_tables(range)?;
     Ok(locked.compact(
         selection,
+        &mut Discard,
+        &AtomicBool::new(false),
         CompactionOptions {
             block_size: 0,
             ..Default::default()
@@ -424,6 +538,8 @@ fn partial_expiry_does_not_restore_a_lower_reflog_after_cleanup() -> crate::Resu
     let selection = locked.snapshot().select_tables(1..2)?;
     let current = locked.compact(
         selection,
+        &mut Discard,
+        &AtomicBool::new(false),
         CompactionOptions {
             log_retention: LogRetention {
                 min_update_index: None,
@@ -490,6 +606,8 @@ fn full_expiry_can_publish_an_empty_log_only_stack() -> crate::Result {
     let selection = locked.snapshot().select_tables(0..1)?;
     let after = locked.compact(
         selection,
+        &mut Discard,
+        &AtomicBool::new(false),
         CompactionOptions {
             log_retention: LogRetention {
                 min_update_index: None,
@@ -594,7 +712,12 @@ fn a_range_from_an_older_snapshot_cannot_compact_different_tables() -> crate::Re
     }
     let original = stack.snapshot()?;
     let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
-    locked.compact(original.select_tables(1..3)?, CompactionOptions::default())?;
+    locked.compact(
+        original.select_tables(1..3)?,
+        &mut Discard,
+        &AtomicBool::new(false),
+        CompactionOptions::default(),
+    )?;
     let current = stack.snapshot()?;
     assert_eq!(
         current.table_names().len(),
@@ -605,7 +728,12 @@ fn a_range_from_an_older_snapshot_cannot_compact_different_tables() -> crate::Re
 
     let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
     let error = locked
-        .compact(original.select_tables(2..4)?, CompactionOptions::default())
+        .compact(
+            original.select_tables(2..4)?,
+            &mut Discard,
+            &AtomicBool::new(false),
+            CompactionOptions::default(),
+        )
         .err()
         .expect("the stale selection must be rejected");
     assert!(
@@ -637,10 +765,20 @@ fn a_name_bound_range_can_move_when_earlier_tables_are_compacted() -> crate::Res
     let selection = original.select_tables(3..5)?;
     let unchanged = original.table_names().nth(2).expect("middle table").to_owned();
     let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
-    locked.compact(original.select_tables(0..2)?, CompactionOptions::default())?;
+    locked.compact(
+        original.select_tables(0..2)?,
+        &mut Discard,
+        &AtomicBool::new(false),
+        CompactionOptions::default(),
+    )?;
 
     let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
-    let after = locked.compact(selection, CompactionOptions::default())?;
+    let after = locked.compact(
+        selection,
+        &mut Discard,
+        &AtomicBool::new(false),
+        CompactionOptions::default(),
+    )?;
     assert_eq!(after.table_names().len(), 3, "both selected tables are merged");
     assert_eq!(
         after.table_names().nth(1).expect("unselected middle table"),

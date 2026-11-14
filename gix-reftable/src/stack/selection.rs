@@ -1,8 +1,9 @@
-use std::ops::Range;
+use std::{ops::Range, sync::atomic::AtomicBool};
 
 use gix_error::{OptionExt, Result, ResultExt, bail, message, validation};
+use gix_utils::progress::Progress;
 
-use super::{CompactionOptions, Snapshot, Stack};
+use super::{CompactionOptions, Snapshot, Stack, compact::check_interrupt};
 use crate::write::MAX_BLOCK_SIZE;
 
 /// Caller-resolved settings for one step of geometric stack maintenance.
@@ -33,18 +34,23 @@ impl Stack {
     pub fn compact_if_needed(
         &self,
         mode: gix_lock::acquire::Fail,
+        progress: &mut dyn Progress,
+        should_interrupt: &AtomicBool,
         options: MaintenanceOptions,
     ) -> Result<Option<Snapshot>> {
         check_factor(options.factor)?;
         if options.compaction.block_size as usize > MAX_BLOCK_SIZE {
             bail!(validation("Compaction block size exceeds the reftable format limit"));
         }
+        check_interrupt(should_interrupt)?;
         let locked = self.lock(mode)?;
         let Some(range) = locked.snapshot().geometric_range(options.factor)? else {
             return Ok(None);
         };
         let selection = locked.snapshot().select_tables(range)?;
-        locked.compact(selection, options.compaction).map(Some)
+        locked
+            .compact(selection, progress, should_interrupt, options.compaction)
+            .map(Some)
     }
 }
 

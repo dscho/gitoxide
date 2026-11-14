@@ -1,10 +1,12 @@
 use std::{
     io::{self, Write},
     ops::Range,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use bstr::BString;
-use gix_error::{OptionExt, Result, ResultExt, bail, conflict, message, validation};
+use gix_error::{OptionExt, Result, ResultExt, bail, cancelled, conflict, message, validation};
+use gix_utils::progress::Progress;
 
 use super::{Locked, Snapshot, log, reference};
 use crate::{Header, LogRef, ReferenceRef, Table, log::DataRef, reference::ValueRef, write::Writer};
@@ -71,6 +73,13 @@ impl LogRetention {
     }
 }
 
+pub(super) fn check_interrupt(should_interrupt: &AtomicBool) -> Result<()> {
+    if should_interrupt.load(Ordering::Relaxed) {
+        bail!(cancelled("Reftable compaction interrupted"));
+    }
+    Ok(())
+}
+
 impl Snapshot {
     /// Remember the table identities in `range` for a later locked compaction.
     ///
@@ -101,18 +110,27 @@ impl Snapshot {
     ///
     /// Partial ranges turn expired logs into tombstones, so entries in lower
     /// tables cannot reappear. To expire every old log, compact the whole stack.
+    ///
+    /// Count written records in `progress` and check `should_interrupt` between
+    /// records. Use [`gix_utils::progress::Discard`] when no progress is needed.
     pub fn compact_into<W: Write>(
         &self,
         range: Range<usize>,
         out: W,
+        progress: &mut dyn Progress,
+        should_interrupt: &AtomicBool,
         options: CompactionOptions,
     ) -> Result<(W, usize)> {
+        check_interrupt(should_interrupt)?;
         let header = self.compaction_header(&range, options.block_size)?;
         let tables = self.parsed_range(range.clone())?;
+        progress.init(None, gix_utils::progress::count("records"));
         let mut writer = Writer::new(out, header)?;
         let mut count = 0;
         let mut references = reference::Iter::from_tables(tables.clone(), None)?;
-        while let Some(record) = references.next_stored()? {
+        loop {
+            check_interrupt(should_interrupt)?;
+            let Some(record) = references.next_stored()? else { break };
             if range.start == 0 && record.value.is_none() {
                 continue;
             }
@@ -130,9 +148,12 @@ impl Snapshot {
                 value,
             })?;
             count += 1;
+            progress.inc();
         }
         let mut logs = log::Iter::from_tables(tables, None)?;
-        while let Some(record) = logs.next_stored()? {
+        loop {
+            check_interrupt(should_interrupt)?;
+            let Some(record) = logs.next_stored()? else { break };
             let keep = record
                 .data
                 .as_ref()
@@ -153,7 +174,9 @@ impl Snapshot {
                 }),
             })?;
             count += 1;
+            progress.inc();
         }
+        check_interrupt(should_interrupt)?;
         Ok((writer.finish()?, count))
     }
 
@@ -180,24 +203,44 @@ impl Locked {
     ///
     /// The manifest lock is held for the complete rewrite and publication.
     /// Concurrent writers may time out.
-    pub fn compact(self, selection: TableRange, options: CompactionOptions) -> Result<Snapshot> {
-        self.compact_with(selection, options, std::fs::File::sync_all, std::fs::File::sync_all)
+    pub fn compact(
+        self,
+        selection: TableRange,
+        progress: &mut dyn Progress,
+        should_interrupt: &AtomicBool,
+        options: CompactionOptions,
+    ) -> Result<Snapshot> {
+        self.compact_with(
+            selection,
+            progress,
+            should_interrupt,
+            options,
+            std::fs::File::sync_all,
+            std::fs::File::sync_all,
+        )
     }
 
     fn compact_with(
         self,
         selection: TableRange,
+        progress: &mut dyn Progress,
+        should_interrupt: &AtomicBool,
         options: CompactionOptions,
         sync_table: impl FnOnce(&std::fs::File) -> io::Result<()>,
         sync_manifest: impl FnOnce(&std::fs::File) -> io::Result<()>,
     ) -> Result<Snapshot> {
+        check_interrupt(should_interrupt)?;
         let range = selection.locate(&self.snapshot)?;
         let header = self.snapshot.compaction_header(&range, options.block_size)?;
         let selected = range.clone();
         self.publish_with(
             range,
             header,
-            move |snapshot, out| snapshot.compact_into(selected, out, options).map(|_| ()),
+            move |snapshot, out| {
+                snapshot
+                    .compact_into(selected, out, progress, should_interrupt, options)
+                    .map(|_| ())
+            },
             sync_table,
             sync_manifest,
         )
@@ -248,6 +291,8 @@ mod tests {
                 locked
                     .compact_with(
                         selection,
+                        &mut gix_utils::progress::Discard,
+                        &AtomicBool::new(false),
                         CompactionOptions {
                             block_size: 0,
                             ..Default::default()
