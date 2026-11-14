@@ -80,6 +80,29 @@ fn indexed_log_table() -> crate::Result<Vec<u8>> {
     Ok(data)
 }
 
+fn padded_root_log_index_table() -> crate::Result<Vec<u8>> {
+    let mut data = super::reference::empty_table();
+    let header_len = if data[4] == 1 { 24 } else { 28 };
+    let mut footer = data.split_off(header_len);
+    for header in [&mut data, &mut footer] {
+        header[5..8].copy_from_slice(&128_u32.to_be_bytes()[1..]);
+    }
+    data.extend(compressed_block(header_len, &record(b"refs/a", 10, true), &[0])?);
+    let second_offset = data.len();
+    data.extend(compressed_block(0, &record(b"refs/z", 9, true), &[0])?);
+    let root_offset = data.len();
+    let first = super::reference::index_record(&log_key(b"refs/a", 10), 0);
+    let first = super::reference::block(b'i', 0, &first, &[0]);
+    data.extend_from_slice(&first);
+    data.resize(root_offset + 128, 0);
+    let second = super::reference::index_record(&log_key(b"refs/z", 9), second_offset);
+    data.extend(super::reference::block(b'i', 0, &second, &[0]));
+    data.extend_from_slice(&footer);
+    super::envelope::footer_field(&mut data, 4).copy_from_slice(&(root_offset as u64).to_be_bytes());
+    super::envelope::update_checksum(&mut data);
+    Ok(data)
+}
+
 #[test]
 fn log_only_tables_preserve_binary_values_and_tombstones() -> crate::Result {
     let mut records = record(b"refs/a", 10, true);
@@ -204,6 +227,59 @@ fn sequential_logs_stop_at_multilevel_index() -> crate::Result {
     assert!(
         logs.next_record()?.is_none(),
         "lower index levels are not decoded as log blocks"
+    );
+    Ok(())
+}
+
+#[test]
+fn seek_uses_the_log_index_and_reverse_update_order() -> crate::Result {
+    let data = indexed_log_table()?;
+    let table = Table::from_bytes(&data)?;
+    for (name, update_index, expected) in [
+        ("refs/0", u64::MAX, Some(("refs/a", 10))),
+        ("refs/a", u64::MAX, Some(("refs/a", 10))),
+        ("refs/b", u64::MAX, Some(("refs/z", 9))),
+        ("refs/z", u64::MAX, Some(("refs/z", 9))),
+        ("refs/zz", u64::MAX, None),
+    ] {
+        let mut logs = table.logs();
+        logs.seek(name.into(), update_index)?;
+        assert_eq!(
+            logs.next_record()?
+                .map(|record| (record.name.to_str().expect("test names are UTF-8"), record.update_index)),
+            expected,
+            "{name}@{update_index} positions at the lower-bound log key"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn seeking_beyond_the_last_unindexed_log_does_not_read_the_footer() -> crate::Result {
+    let data = log_table(&record(b"refs/a", 10, true), &[0])?;
+    let table = Table::from_bytes(&data)?;
+    let mut logs = table.logs();
+    for (name, update_index) in [("refs/z", u64::MAX), ("refs/a", 0)] {
+        logs.seek(name.into(), update_index)?;
+        assert!(
+            logs.next_record()?.is_none(),
+            "{name}@{update_index} follows the last log key"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn log_index_root_blocks_follow_table_padding() -> crate::Result {
+    let data = padded_root_log_index_table()?;
+    let table = Table::from_bytes(&data)?;
+    let mut logs = table.logs();
+    logs.seek("refs/z".into(), u64::MAX)?;
+    assert_eq!(
+        logs.next_record()?
+            .expect("the second padded root block points to refs/z")
+            .name,
+        "refs/z"
     );
     Ok(())
 }

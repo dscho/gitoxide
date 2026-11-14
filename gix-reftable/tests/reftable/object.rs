@@ -149,3 +149,27 @@ fn invalid_counts_offsets_and_abbreviation_lengths_are_rejected() -> crate::Resu
     );
     Ok(())
 }
+
+#[test]
+fn seek_uses_the_object_index() -> crate::Result {
+    let data = indexed_object_table();
+    let table = Table::from_bytes(&data)?;
+    for (query, expected) in [
+        ([0, 0], Some([0x11, 0x11])),
+        ([0x11, 0x11], Some([0x11, 0x11])),
+        ([0x22, 0x22], Some([0xee, 0xee])),
+        ([0xee, 0xee], Some([0xee, 0xee])),
+        ([0xff, 0xff], None),
+    ] {
+        let mut objects = table.objects();
+        objects.seek(&query)?;
+        assert_eq!(
+            objects
+                .next_record()?
+                .map(|record| record.hash_prefix.try_into().expect("two-byte test prefix")),
+            expected,
+            "{query:?} positions at the lower-bound object abbreviation"
+        );
+    }
+    Ok(())
+}

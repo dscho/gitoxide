@@ -1,4 +1,4 @@
-use crate::{Header, Table, Version};
+use crate::{Header, Table, Version, block, decode};
 use gix_error::{OptionExt, Result, bail, corruption, message};
 
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +78,14 @@ impl<'a> Table<'a> {
         (self.footer.object_index != 0).then_some(self.footer.object_index)
     }
 
+    pub(crate) fn object_index_end(&self) -> usize {
+        [self.footer.logs, self.body_end()]
+            .into_iter()
+            .filter(|offset| *offset != 0 && *offset > self.footer.object_index)
+            .min()
+            .expect("the footer always follows the object index")
+    }
+
     pub(crate) fn object_id_len(&self) -> usize {
         self.footer.object_id_len
     }
@@ -125,6 +133,66 @@ impl<'a> Table<'a> {
             bail!(corruption("Block padding contains nonzero bytes"));
         }
         Ok(aligned_end)
+    }
+
+    pub(crate) fn indexed_block(
+        &self,
+        mut offset: usize,
+        root_end: usize,
+        want: &[u8],
+        expected_leaf: u8,
+    ) -> Result<Option<usize>> {
+        let mut root = true;
+        loop {
+            let mut index_offset = offset;
+            let pointed_to = loop {
+                let (found, next) = self.index_entry(index_offset, want)?;
+                if let Some(found) = found {
+                    break found;
+                }
+                if !root || next >= root_end {
+                    return Ok(None);
+                }
+                index_offset = next;
+            };
+            if pointed_to >= offset {
+                bail!(corruption("An index must point to an earlier block"));
+            }
+            let data = self.block_data(pointed_to)?;
+            match data.get(self.header_skip(pointed_to)) {
+                Some(kind) if *kind == expected_leaf => return Ok(Some(pointed_to)),
+                Some(b'i') => {
+                    offset = pointed_to;
+                    root = false;
+                }
+                _ => bail!(corruption("An index points to an unexpected block")),
+            }
+        }
+    }
+
+    fn index_entry(&self, offset: usize, want: &[u8]) -> Result<(Option<usize>, usize)> {
+        let data = self.block_data(offset)?;
+        let block = block::Block::from_bytes(data, self.header_skip(offset))?;
+        if block.kind(data) != b'i' {
+            bail!(corruption("Index section contains a non-index block"));
+        }
+        let mut position = block.start();
+        let mut key = Vec::new();
+        block.seek(data, &mut position, &mut key, want)?;
+        let mut found = None;
+        while let Some(index_offset) = block.next(data, &mut position, &mut key, |input, value_type| {
+            if value_type != 0 {
+                bail!(corruption("Index record has a reserved value type"));
+            }
+            let offset = decode::varint(input)?;
+            decode::size(offset)
+        })? {
+            if key.as_slice() >= want {
+                found = Some(index_offset);
+                break;
+            }
+        }
+        Ok((found, self.next_uncompressed_block(offset, block.size)?))
     }
 }
 

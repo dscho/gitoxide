@@ -172,4 +172,27 @@ impl Block {
         position.restart = next_restart;
         Ok(Some(value))
     }
+
+    pub fn lower_bound<'a, T>(
+        self,
+        data: &'a [u8],
+        position: &mut Position,
+        key: &mut Vec<u8>,
+        prior_key: &mut Vec<u8>,
+        want: &[u8],
+        mut value: impl FnMut(&mut &'a [u8], u8) -> Result<T>,
+    ) -> Result<bool> {
+        self.seek(data, position, key, want)?;
+        while !self.is_done(*position) {
+            let previous_position = *position;
+            prior_key.clone_from(key);
+            self.next(data, position, key, |input, value_type| value(input, value_type))?;
+            if key.as_slice() >= want {
+                *position = previous_position;
+                std::mem::swap(key, prior_key);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }

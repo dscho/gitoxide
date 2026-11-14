@@ -33,6 +33,7 @@ pub struct Iter<'a> {
     compressed_len: usize,
     inflated: Vec<u8>,
     key: Vec<u8>,
+    seek_key: Vec<u8>,
     done: bool,
 }
 
@@ -49,12 +50,66 @@ impl<'a> Table<'a> {
             compressed_len: 0,
             inflated: Vec::new(),
             key: Vec::new(),
+            seek_key: Vec::new(),
             done: start.is_none(),
         }
     }
 }
 
 impl Iter<'_> {
+    /// Position this cursor at the first log key greater than or equal to
+    /// `name` and `update_index`.
+    ///
+    /// Use `u64::MAX` to seek to the newest entry of a reference.
+    pub fn seek(&mut self, name: &bstr::BStr, update_index: u64) -> Result<()> {
+        let mut want = Vec::new();
+        want.try_reserve(name.len() + 9)
+            .or_raise(|| message("Could not allocate the reflog seek key"))?;
+        want.extend_from_slice(name.as_bytes());
+        want.push(0);
+        want.extend_from_slice(&(!update_index).to_be_bytes());
+
+        self.key.clear();
+        self.seek_key.clear();
+        self.block = None;
+        self.done = false;
+        self.next_block = match self.table.log_block(&want)? {
+            Some(offset) => offset,
+            None => {
+                self.done = true;
+                return Ok(());
+            }
+        };
+        while !self.done {
+            self.load_block()?;
+            if self.done {
+                return Ok(());
+            }
+            let (block, position) = self.block.as_mut().expect("a log block was loaded");
+            let header = self.table.header;
+            if block.lower_bound(
+                &self.inflated,
+                position,
+                &mut self.key,
+                &mut self.seek_key,
+                &want,
+                |input, value_type| decode_log(input, value_type, header),
+            )? {
+                return Ok(());
+            }
+            self.next_block = self
+                .block_offset
+                .checked_add(self.compressed_len)
+                .filter(|offset| *offset <= self.end)
+                .ok_or_raise(|| corruption("Compressed log block extends beyond the log section"))?;
+            self.block = None;
+            if self.next_block == self.end || self.table.log_index_start().is_some() {
+                self.done = true;
+            }
+        }
+        Ok(())
+    }
+
     /// Read the next reflog record, borrowing this cursor's buffers.
     ///
     /// Returns `None` at the end. After an error, subsequent calls return `None`.
@@ -62,6 +117,7 @@ impl Iter<'_> {
         if self.done {
             return Ok(None);
         }
+
         if let Err(err) = self.ensure_record() {
             self.done = true;
             return Err(err);
@@ -190,6 +246,15 @@ impl Iter<'_> {
         self.compressed_len = compressed_len;
         self.block = Some((block, block.start()));
         Ok(())
+    }
+}
+
+impl Table<'_> {
+    fn log_block(&self, want: &[u8]) -> Result<Option<usize>> {
+        let Some(offset) = self.log_index_start() else {
+            return Ok(self.logs_start());
+        };
+        self.indexed_block(offset, self.body_end(), want, b'g')
     }
 }
 

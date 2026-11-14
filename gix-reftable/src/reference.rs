@@ -73,19 +73,16 @@ impl<'a> Iter<'a> {
             }
             let (block, position) = self.block.as_mut().expect("a block was loaded");
             let data = self.table.block_data(self.block_offset)?;
-            block.seek(data, position, &mut self.key, name.as_bytes())?;
-            while !block.is_done(*position) {
-                let previous_position = *position;
-                self.seek_key.clone_from(&self.key);
-                let header = self.table.header;
-                block.next(data, position, &mut self.key, |input, value_type| {
-                    decode_reference(input, value_type, header)
-                })?;
-                if self.key.as_slice() >= name.as_bytes() {
-                    *position = previous_position;
-                    std::mem::swap(&mut self.key, &mut self.seek_key);
-                    return Ok(());
-                }
+            let header = self.table.header;
+            if block.lower_bound(
+                data,
+                position,
+                &mut self.key,
+                &mut self.seek_key,
+                name.as_bytes(),
+                |input, value_type| decode_reference(input, value_type, header),
+            )? {
+                return Ok(());
             }
             self.block = None;
             if self.table.reference_index_start().is_some() {
@@ -176,55 +173,10 @@ impl<'a> Iter<'a> {
 
 impl Table<'_> {
     fn reference_block(&self, want: &[u8]) -> Result<Option<usize>> {
-        let Some(mut offset) = self.reference_index_start() else {
+        let Some(offset) = self.reference_index_start() else {
             return Ok((self.first_block_kind() == Some(b'r')).then_some(0));
         };
-        let root_end = self.reference_index_end();
-        let mut root = true;
-        loop {
-            let end = if root { root_end } else { self.body_end() };
-            let Some(next) = self.index_entry(offset, end, want)? else {
-                return Ok(None);
-            };
-            if next >= offset {
-                bail!(corruption("A reference index must point to an earlier block"));
-            }
-            let data = self.block_data(next)?;
-            match data.get(self.header_skip(next)) {
-                Some(b'r') => return Ok(Some(next)),
-                Some(b'i') => {
-                    offset = next;
-                    root = false;
-                }
-                _ => bail!(corruption("A reference index points to an unexpected block")),
-            }
-        }
-    }
-
-    fn index_entry(&self, mut offset: usize, end: usize, want: &[u8]) -> Result<Option<usize>> {
-        let mut key = Vec::new();
-        while offset < end {
-            let data = self.block_data(offset)?;
-            let block = block::Block::from_bytes(data, self.header_skip(offset))?;
-            if block.kind(data) != b'i' {
-                bail!(corruption("Reference index contains a non-index block"));
-            }
-            let mut position = block.start();
-            block.seek(data, &mut position, &mut key, want)?;
-            while let Some(index_offset) = block.next(data, &mut position, &mut key, |input, value_type| {
-                if value_type != 0 {
-                    bail!(corruption("Index record has a reserved value type"));
-                }
-                let offset = decode::varint(input)?;
-                decode::size(offset)
-            })? {
-                if key.as_slice() >= want {
-                    return Ok(Some(index_offset));
-                }
-            }
-            offset = self.next_uncompressed_block(offset, block.size)?;
-        }
-        Ok(None)
+        self.indexed_block(offset, self.reference_index_end(), want, b'r')
     }
 }
 

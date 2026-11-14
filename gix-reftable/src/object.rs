@@ -10,6 +10,7 @@ pub struct Iter<'a> {
     block: Option<(block::Block, block::Position)>,
     block_offset: usize,
     key: Vec<u8>,
+    seek_key: Vec<u8>,
     offsets: Vec<usize>,
     done: bool,
 }
@@ -25,6 +26,7 @@ impl<'a> Table<'a> {
             block: None,
             block_offset: 0,
             key: Vec::new(),
+            seek_key: Vec::new(),
             offsets: Vec::new(),
             done: start.is_none(),
         }
@@ -32,6 +34,50 @@ impl<'a> Table<'a> {
 }
 
 impl Iter<'_> {
+    /// Position this cursor at the first abbreviation greater than or equal to
+    /// `hash_prefix`, using the optional object index when present.
+    pub fn seek(&mut self, hash_prefix: &[u8]) -> Result<()> {
+        self.key.clear();
+        self.seek_key.clear();
+        self.offsets.clear();
+        self.block = None;
+        self.done = false;
+        self.next_block = match self.table.object_block(hash_prefix)? {
+            Some(offset) => offset,
+            None => {
+                self.done = true;
+                return Ok(());
+            }
+        };
+        while !self.done {
+            self.load_next_block()?;
+            if self.done {
+                return Ok(());
+            }
+            let (block, position) = self.block.as_mut().expect("an object block was loaded");
+            let data = self.table.block_data(self.block_offset)?;
+            self.offsets.clear();
+            let offsets = &mut self.offsets;
+            let body_end = self.table.body_end();
+            if block.lower_bound(
+                data,
+                position,
+                &mut self.key,
+                &mut self.seek_key,
+                hash_prefix,
+                |input, count| decode_offsets(input, count, offsets, body_end),
+            )? {
+                self.offsets.clear();
+                return Ok(());
+            }
+            self.block = None;
+            if self.table.object_index_start().is_some() {
+                self.done = true;
+            }
+        }
+        Ok(())
+    }
+
     /// Read the next reverse-index record, borrowing this cursor's buffers.
     ///
     /// Returns `None` at the end. After an error, subsequent calls return `None`.
@@ -55,35 +101,10 @@ impl Iter<'_> {
     fn advance(&mut self) -> Result<Option<()>> {
         while !self.done {
             if self.block.is_none() {
-                if self.next_block == self.end {
-                    self.done = true;
+                self.load_next_block()?;
+                if self.done {
                     return Ok(None);
                 }
-                let data = self.table.block_data(self.next_block)?;
-                match data.first() {
-                    Some(b'o') => {}
-                    Some(b'i')
-                        if self
-                            .table
-                            .object_index_start()
-                            .is_some_and(|root| self.next_block <= root) =>
-                    {
-                        self.done = true;
-                        return Ok(None);
-                    }
-                    Some(b'g') if self.table.logs_start() == Some(self.next_block) => {
-                        self.done = true;
-                        return Ok(None);
-                    }
-                    _ => bail!(corruption("Unexpected block in the object section")),
-                }
-                let block = block::Block::from_bytes(data, 0)?;
-                if self.table.header.block_size != 0 && block.size > self.table.header.block_size as usize {
-                    bail!(corruption("Object block exceeds the table's block size"));
-                }
-                self.block_offset = self.next_block;
-                self.next_block = self.table.next_uncompressed_block(self.block_offset, block.size)?;
-                self.block = Some((block, block.start()));
             }
             let (block, position) = self.block.as_mut().expect("an object block was loaded");
             let data = self.table.block_data(self.block_offset)?;
@@ -102,6 +123,48 @@ impl Iter<'_> {
             self.block = None;
         }
         Ok(None)
+    }
+
+    fn load_next_block(&mut self) -> Result<()> {
+        if self.next_block == self.end {
+            self.done = true;
+            return Ok(());
+        }
+        let data = self.table.block_data(self.next_block)?;
+        match data.first() {
+            Some(b'o') => {}
+            Some(b'i')
+                if self
+                    .table
+                    .object_index_start()
+                    .is_some_and(|root| self.next_block <= root) =>
+            {
+                self.done = true;
+                return Ok(());
+            }
+            Some(b'g') if self.table.logs_start() == Some(self.next_block) => {
+                self.done = true;
+                return Ok(());
+            }
+            _ => bail!(corruption("Unexpected block in the object section")),
+        }
+        let block = block::Block::from_bytes(data, 0)?;
+        if self.table.header.block_size != 0 && block.size > self.table.header.block_size as usize {
+            bail!(corruption("Object block exceeds the table's block size"));
+        }
+        self.block_offset = self.next_block;
+        self.next_block = self.table.next_uncompressed_block(self.block_offset, block.size)?;
+        self.block = Some((block, block.start()));
+        Ok(())
+    }
+}
+
+impl Table<'_> {
+    fn object_block(&self, want: &[u8]) -> Result<Option<usize>> {
+        let Some(offset) = self.object_index_start() else {
+            return Ok(self.objects_start());
+        };
+        self.indexed_block(offset, self.object_index_end(), want, b'o')
     }
 }
 
