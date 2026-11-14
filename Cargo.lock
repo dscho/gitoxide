@@ -2464,6 +2464,7 @@ dependencies = [
  "gix-lock",
  "gix-path",
  "gix-testtools",
+ "gix-utils",
  "gix-zlib",
 ]
 

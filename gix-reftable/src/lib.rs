@@ -2,7 +2,8 @@
 //!
 //! [`Table::from_bytes()`] borrows an encoded table, and [`write::Writer`] streams
 //! standalone tables. [`stack::Stack`] loads immutable snapshots from
-//! `tables.list`. Repository configuration and reference policy remain separate.
+//! `tables.list` and publishes new tables under its manifest lock. Repository
+//! configuration and reference policy remain separate.
 #![deny(missing_docs, unsafe_code)]
 
 /// Byte-string types used for reference names and record data.
