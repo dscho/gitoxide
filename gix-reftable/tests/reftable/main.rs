@@ -38,6 +38,7 @@ mod cleanup;
 mod compact;
 mod envelope;
 mod log;
+mod maintenance;
 mod object;
 mod oracle;
 mod reference;

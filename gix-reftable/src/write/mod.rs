@@ -5,7 +5,7 @@ use gix_error::{OptionExt, Result, ResultExt, bail, message, unsupported, valida
 
 use crate::{Header, ReferenceRef, Version, reference::ValueRef};
 
-const MAX_BLOCK_SIZE: usize = 0x00ff_ffff;
+pub(crate) const MAX_BLOCK_SIZE: usize = 0x00ff_ffff;
 const DEFAULT_BLOCK_SIZE: usize = 4096;
 const RESTART_INTERVAL: usize = 16;
 
