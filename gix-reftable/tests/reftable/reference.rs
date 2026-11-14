@@ -55,6 +55,38 @@ fn object_record() -> Vec<u8> {
     record
 }
 
+fn named_object_record(name: &[u8], byte: u8) -> Vec<u8> {
+    let mut record = vec![0];
+    super::log::varint((name.len() as u64) << 3 | 1, &mut record);
+    record.extend_from_slice(name);
+    record.push(0);
+    record.extend(std::iter::repeat_n(byte, gix_testtools::object_hash().len_in_bytes()));
+    record
+}
+
+fn indexed_table(invalid_cycle: bool) -> Vec<u8> {
+    let mut data = empty_table();
+    let header_len = if data[4] == 1 { 24 } else { 28 };
+    let footer = data.split_off(header_len);
+    let first = named_object_record(b"refs/a", 1);
+    data.extend(block(b'r', header_len, &first, &[0]));
+    let second_offset = data.len();
+    let second = named_object_record(b"refs/z", 2);
+    data.extend(block(b'r', 0, &second, &[0]));
+    let lower_offset = data.len();
+    let mut lower = index_record(b"refs/a", 0);
+    let second_restart = lower.len();
+    lower.extend(index_record(b"refs/z", second_offset));
+    data.extend(block(b'i', 0, &lower, &[0, second_restart]));
+    let root_offset = data.len();
+    let root = index_record(b"refs/z", if invalid_cycle { root_offset } else { lower_offset });
+    data.extend(block(b'i', 0, &root, &[0]));
+    data.extend_from_slice(&footer);
+    super::envelope::footer_field(&mut data, 0).copy_from_slice(&(root_offset as u64).to_be_bytes());
+    super::envelope::update_checksum(&mut data);
+    data
+}
+
 #[test]
 fn prefix_compressed_references_retain_all_value_kinds() -> crate::Result {
     let hash_len = gix_testtools::object_hash().len_in_bytes();
@@ -244,6 +276,94 @@ fn names_are_bytes_and_not_utf8_strings() -> crate::Result {
         iter.next_record()?.expect("one binary name").name,
         b"\xff\xfe".as_bstr(),
         "the storage layer does not impose Unicode or reference-name policy"
+    );
+    Ok(())
+}
+
+#[test]
+fn seek_uses_restart_points_and_returns_the_first_name_at_or_after_the_query() -> crate::Result {
+    let mut records = Vec::new();
+    let mut restarts = Vec::new();
+    for (name, byte) in [(b"refs/a".as_slice(), 1), (b"refs/m", 2), (b"refs/z", 3)] {
+        restarts.push(records.len());
+        records.extend(named_object_record(name, byte));
+    }
+    let data = table_with_records(&records, &restarts);
+    let table = Table::from_bytes(&data)?;
+    for (query, expected) in [
+        ("refs/0", Some("refs/a")),
+        ("refs/a", Some("refs/a")),
+        ("refs/b", Some("refs/m")),
+        ("refs/m", Some("refs/m")),
+        ("refs/z", Some("refs/z")),
+        ("refs/zz", None),
+    ] {
+        let mut iter = table.references();
+        iter.seek(query.into())?;
+        assert_eq!(
+            iter.next_record()?
+                .map(|reference| reference.name.to_str().expect("test names are UTF-8")),
+            expected,
+            "{query} positions the cursor at its lower bound"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn seek_descends_a_multi_level_index() -> crate::Result {
+    let data = indexed_table(false);
+    let table = Table::from_bytes(&data)?;
+    for (query, expected) in [
+        ("refs/0", Some("refs/a")),
+        ("refs/a", Some("refs/a")),
+        ("refs/b", Some("refs/z")),
+        ("refs/z", Some("refs/z")),
+        ("refs/zz", None),
+    ] {
+        let mut iter = table.references();
+        iter.seek(query.into())?;
+        assert_eq!(
+            iter.next_record()?
+                .map(|reference| reference.name.to_str().expect("test names are UTF-8")),
+            expected,
+            "{query} follows root and leaf index records"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn index_cycles_are_rejected() -> crate::Result {
+    let data = indexed_table(true);
+    let table = Table::from_bytes(&data)?;
+    assert!(
+        table.references().seek("refs/a".into()).is_err(),
+        "index records can only point to earlier blocks"
+    );
+    Ok(())
+}
+
+#[test]
+fn root_index_blocks_cannot_point_to_each_other() -> crate::Result {
+    let mut data = empty_table();
+    let header_len = if data[4] == 1 { 24 } else { 28 };
+    let footer = data.split_off(header_len);
+    let reference = named_object_record(b"refs/a", 1);
+    data.extend(block(b'r', header_len, &reference, &[0]));
+    let root_offset = data.len();
+    let first = index_record(b"refs/a", 0);
+    data.extend(block(b'i', 0, &first, &[0]));
+    let second = index_record(b"refs/z", root_offset);
+    data.extend(block(b'i', 0, &second, &[0]));
+    data.extend_from_slice(&footer);
+    super::envelope::footer_field(&mut data, 0).copy_from_slice(&(root_offset as u64).to_be_bytes());
+    super::envelope::update_checksum(&mut data);
+
+    let table = Table::from_bytes(&data)?;
+    assert!(
+        table.references().seek("refs/z".into()).is_err(),
+        "a root-level entry cannot point to another root block"
     );
     Ok(())
 }

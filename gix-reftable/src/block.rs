@@ -80,6 +80,28 @@ impl Block {
         position.offset == self.records_end
     }
 
+    pub fn kind(self, data: &[u8]) -> u8 {
+        data[self.records_start - 4]
+    }
+
+    pub fn seek(self, data: &[u8], position: &mut Position, key: &mut Vec<u8>, want: &[u8]) -> Result<()> {
+        let mut low = 0;
+        let mut high = self.restart_count;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if self.restart_key(data, mid)? <= want {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let restart = low.saturating_sub(1);
+        position.offset = self.restart_offset(data, restart);
+        position.restart = restart;
+        key.clear();
+        Ok(())
+    }
+
     fn restart_offset(self, data: &[u8], index: usize) -> usize {
         let pos = self.records_end + 3 * index;
         u32::from_be_bytes([0, data[pos], data[pos + 1], data[pos + 2]]) as usize

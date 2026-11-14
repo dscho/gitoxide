@@ -54,6 +54,14 @@ impl<'a> Table<'a> {
         (self.footer.ref_index != 0).then_some(self.footer.ref_index)
     }
 
+    pub(crate) fn reference_index_end(&self) -> usize {
+        [self.footer.objects, self.footer.logs, self.body_end()]
+            .into_iter()
+            .filter(|offset| *offset != 0 && *offset > self.footer.ref_index)
+            .min()
+            .expect("the footer always follows the reference index")
+    }
+
     pub(crate) fn objects_start(&self) -> Option<usize> {
         (self.footer.objects != 0).then_some(self.footer.objects)
     }
