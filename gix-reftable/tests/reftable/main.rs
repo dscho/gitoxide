@@ -40,3 +40,4 @@ mod oracle;
 mod reference;
 mod stack;
 mod write;
+mod write_log;

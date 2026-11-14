@@ -1,7 +1,7 @@
 use gix_reftable::{Header, ReferenceRef, Table, Version, reference::ValueRef, write::Writer};
 use gix_testtools::bstr::{BStr, ByteSlice};
 
-fn header() -> Header {
+pub(super) fn header() -> Header {
     let object_hash = gix_testtools::object_hash();
     Header {
         version: if object_hash == gix_hash::Kind::Sha1 {
@@ -28,6 +28,15 @@ fn reference_index_root(bytes: &[u8]) -> crate::Result<usize> {
     Ok(usize::try_from(u64::from_be_bytes(
         bytes[bytes.len() - 44..bytes.len() - 36].try_into()?,
     ))?)
+}
+
+pub(super) fn append_manifest(reftable: &std::path::Path, filename: &str) -> crate::Result {
+    let manifest = reftable.join("tables.list");
+    let mut names = std::fs::read(&manifest)?;
+    names.extend_from_slice(filename.as_bytes());
+    names.push(b'\n');
+    std::fs::write(manifest, names)?;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -408,11 +417,7 @@ fn git_reads_a_native_table_appended_to_a_disposable_stack() -> crate::Result {
             value: ValueRef::Symbolic(BStr::new(b"refs/heads/written")),
         })?;
         writer.finish()?;
-        let manifest = reftable.join("tables.list");
-        let mut names = std::fs::read(&manifest)?;
-        names.extend_from_slice(filename.as_bytes());
-        names.push(b'\n');
-        std::fs::write(manifest, names)?;
+        append_manifest(&reftable, filename)?;
         let listed = gix_testtools::git(&repo, "for-each-ref --format=%(refname)")?;
         assert!(
             listed

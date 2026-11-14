@@ -9,23 +9,27 @@ const MAX_BLOCK_SIZE: usize = 0x00ff_ffff;
 const DEFAULT_BLOCK_SIZE: usize = 4096;
 const RESTART_INTERVAL: usize = 16;
 
+mod log;
+
 struct IndexEntry {
     key: Vec<u8>,
     offset: u64,
 }
 
-/// A table encoder that accepts references in increasing byte order.
+/// A table encoder accepting sorted references followed by sorted reflogs.
 pub struct Writer<W> {
     out: W,
     header: Header,
     failed: bool,
+    log_start: Option<u64>,
+    ref_index_root: u64,
     header_bytes: [u8; 28],
     offset: u64,
     block: Vec<u8>,
     record: Vec<u8>,
     previous_key: Vec<u8>,
     restarts: Vec<usize>,
-    reference_count: usize,
+    record_count: usize,
     index: Vec<IndexEntry>,
 }
 
@@ -62,13 +66,15 @@ impl<W: Write> Writer<W> {
             out,
             header,
             failed: false,
+            log_start: None,
+            ref_index_root: 0,
             header_bytes,
             offset: 0,
             block,
             record: Vec::new(),
             previous_key: Vec::new(),
             restarts: Vec::new(),
-            reference_count: 0,
+            record_count: 0,
             index: Vec::new(),
         })
     }
@@ -77,6 +83,9 @@ impl<W: Write> Writer<W> {
     pub fn push_reference(&mut self, reference: ReferenceRef<'_>) -> Result<()> {
         if self.failed {
             bail!(validation("Cannot add records after a failed table write"));
+        }
+        if self.log_start.is_some() {
+            bail!(validation("References cannot follow reflogs in a table"));
         }
         let key = reference.name.as_bytes();
         if key.is_empty() || (!self.previous_key.is_empty() && key <= self.previous_key.as_slice()) {
@@ -113,7 +122,7 @@ impl<W: Write> Writer<W> {
             .checked_add(40)
             .ok_or_raise(|| validation("Reference value is too long to encode"))?;
 
-        let restart = self.reference_count.is_multiple_of(RESTART_INTERVAL);
+        let restart = self.record_count.is_multiple_of(RESTART_INTERVAL);
         self.record.clear();
         self.record
             .try_reserve(capacity)
@@ -124,7 +133,7 @@ impl<W: Write> Writer<W> {
         if self.append_record(key, restart, self.block_size())? {
             return Ok(());
         }
-        if self.reference_count == 0 {
+        if self.record_count == 0 {
             bail!(validation("Reference record exceeds the table's block size"));
         }
 
@@ -156,7 +165,10 @@ impl<W: Write> Writer<W> {
             bail!(validation("Cannot finish a table after a failed write"));
         }
         let header_len = self.header.version.header_len();
-        let root = if self.reference_count == 0 {
+        let root = if self.log_start.is_some() {
+            self.flush_log_block()?;
+            self.ref_index_root
+        } else if self.record_count == 0 {
             self.block.truncate(header_len);
             self.out
                 .write_all(&self.block)
@@ -173,6 +185,9 @@ impl<W: Write> Writer<W> {
         let mut footer = [0; 72];
         footer[..header_len].copy_from_slice(&self.header_bytes[..header_len]);
         footer[header_len..header_len + 8].copy_from_slice(&root.to_be_bytes());
+        if let Some(start) = self.log_start {
+            footer[header_len + 24..header_len + 32].copy_from_slice(&start.to_be_bytes());
+        }
         let footer_end = header_len + 40;
         let checksum = crc32fast::hash(&footer[..footer_end]);
         footer[footer_end..footer_end + 4].copy_from_slice(&checksum.to_be_bytes());
@@ -214,7 +229,7 @@ impl<W: Write> Writer<W> {
         self.block.extend_from_slice(&self.record);
         self.previous_key.clear();
         self.previous_key.extend_from_slice(key);
-        self.reference_count += 1;
+        self.record_count += 1;
         Ok(true)
     }
 
@@ -260,7 +275,7 @@ impl<W: Write> Writer<W> {
         self.block.clear();
         self.block.extend_from_slice(&[kind, 0, 0, 0]);
         self.restarts.clear();
-        self.reference_count = 0;
+        self.record_count = 0;
         self.failed = false;
         Ok(entry)
     }
@@ -272,7 +287,7 @@ impl<W: Write> Writer<W> {
             self.block.extend_from_slice(b"i\0\0\0");
             self.previous_key.clear();
             self.restarts.clear();
-            self.reference_count = 0;
+            self.record_count = 0;
             let mut next = Vec::new();
             for entry in &level {
                 let capacity = entry
@@ -281,7 +296,7 @@ impl<W: Write> Writer<W> {
                     .checked_add(40)
                     .ok_or_raise(|| validation("Reference-index key is too long"))?;
                 loop {
-                    let restart = self.reference_count.is_multiple_of(RESTART_INTERVAL);
+                    let restart = self.record_count.is_multiple_of(RESTART_INTERVAL);
                     self.record.clear();
                     self.record
                         .try_reserve(capacity)
@@ -291,7 +306,7 @@ impl<W: Write> Writer<W> {
                     if self.append_record(&entry.key, restart, self.block_size())? {
                         break;
                     }
-                    if self.reference_count == 0 {
+                    if self.record_count == 0 {
                         bail!(validation("Reference-index record exceeds the table's block size"));
                     }
                     next.push(self.flush_block(true)?);

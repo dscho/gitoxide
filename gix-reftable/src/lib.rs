@@ -1,7 +1,7 @@
 //! Read and write Git's reftable reference storage format.
 //!
 //! [`Table::from_bytes()`] borrows an encoded table, and [`write::Writer`] streams
-//! standalone reference tables. [`stack::Stack`] loads immutable snapshots from
+//! standalone tables. [`stack::Stack`] loads immutable snapshots from
 //! `tables.list`. Repository configuration and reference policy remain separate.
 #![deny(missing_docs, unsafe_code)]
 
