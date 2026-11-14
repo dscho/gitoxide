@@ -118,8 +118,7 @@ impl Stack {
 pub mod log;
 /// Merged reference views over immutable snapshots.
 pub mod reference;
-
-pub use compact::CompactionOptions;
+pub use compact::{CompactionOptions, TableRange};
 
 mod append;
 mod compact;

@@ -1,3 +1,11 @@
+use gix_reftable::{
+    LogRef, ReferenceRef, Table,
+    log::DataRef,
+    reference::ValueRef,
+    stack::{CompactionOptions, Snapshot, Stack},
+};
+use gix_testtools::bstr::{BStr, ByteSlice};
+
 mod snapshot {
     use std::ops::Range;
 
@@ -182,4 +190,245 @@ mod snapshot {
         }
         Ok(())
     }
+}
+
+fn append(stack: &Stack, name: &BStr, value: Option<u8>, log_index: u64) -> crate::Result {
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    let index = locked.next_update_index()?;
+    let object_id = value
+        .map(|byte| gix_hash::ObjectId::try_from(vec![byte; gix_testtools::object_hash().len_in_bytes()].as_slice()))
+        .transpose()?;
+    let null_id = gix_testtools::object_hash().null();
+    locked.append(super::append::next_header(index), |writer| {
+        writer.push_reference(ReferenceRef {
+            name,
+            update_index: index,
+            value: object_id.as_ref().map_or(ValueRef::Deletion, |id| ValueRef::Object {
+                object_id: id.as_ref(),
+                peeled_id: None,
+            }),
+        })?;
+        writer.push_log(LogRef {
+            name,
+            update_index: log_index,
+            data: object_id.as_ref().map(|id| DataRef {
+                previous_object_id: null_id.as_ref(),
+                new_object_id: id.as_ref(),
+                committer: gix_actor::IdentityRef {
+                    name: BStr::new(b"author"),
+                    email: BStr::new(b"author@example.com"),
+                },
+                time_seconds: index,
+                timezone_minutes: 0,
+                message: BStr::new(b"update\n"),
+            }),
+        })
+    })?;
+    Ok(())
+}
+
+fn compact(stack: &Stack, range: std::ops::Range<usize>) -> crate::Result<Snapshot> {
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    let selection = locked.snapshot().select_tables(range)?;
+    Ok(locked.compact(selection, CompactionOptions { block_size: 0 })?)
+}
+
+#[test]
+fn full_compaction_removes_masked_records_and_can_publish_an_empty_manifest() -> crate::Result {
+    let dir = gix_testtools::tempfile::TempDir::new()?;
+    let stack = Stack::at(dir.path(), gix_testtools::object_hash());
+    append(&stack, BStr::new(b"refs/a"), Some(1), 1)?;
+    let original = stack.snapshot()?;
+    append(&stack, BStr::new(b"refs/a"), None, 1)?;
+    let before = stack.snapshot()?;
+    let after = compact(&stack, 0..2)?;
+    assert!(after.table_names().next().is_none(), "both tables cancel completely");
+    assert!(
+        std::fs::read(dir.path().join("tables.list"))?.is_empty(),
+        "the empty manifest is published"
+    );
+    assert!(
+        original.try_find_reference(BStr::new(b"refs/a"))?.is_some(),
+        "old in-memory snapshots survive replacement"
+    );
+    assert!(before.try_find_reference(BStr::new(b"refs/a"))?.is_none());
+    assert!(stack.snapshot()?.try_find_reference(BStr::new(b"refs/a"))?.is_none());
+    assert!(
+        stack.snapshot()?.logs(BStr::new(b"refs/a"))?.next_record()?.is_none(),
+        "the old log must not reappear"
+    );
+    Ok(())
+}
+
+#[test]
+fn partial_compaction_keeps_tombstones_below_an_unmodified_table() -> crate::Result {
+    let dir = gix_testtools::tempfile::TempDir::new()?;
+    let stack = Stack::at(dir.path(), gix_testtools::object_hash());
+    append(&stack, BStr::new(b"refs/a"), Some(1), 1)?;
+    let lower_name = stack.snapshot()?.table_names().next().expect("base table").to_owned();
+    append(&stack, BStr::new(b"refs/a"), None, 1)?;
+    append(&stack, BStr::new(b"refs/c"), Some(3), 3)?;
+    let before = stack.snapshot()?;
+    let after = compact(&stack, 1..3)?;
+    assert_eq!(after.table_names().len(), 2, "two upper tables are replaced");
+    assert_eq!(after.table_names().next().expect("base table"), lower_name);
+    let compacted = after.table_names().last().expect("replacement table");
+    let encoded = std::fs::read(dir.path().join(gix_path::from_byte_slice(compacted.as_bytes())?))?;
+    let table = Table::from_bytes(&encoded)?;
+    assert_eq!(
+        table.references().next_record()?.expect("stored deletion").value,
+        ValueRef::Deletion,
+        "the compacted table still masks refs/a"
+    );
+    assert!(
+        table.logs().next_record()?.expect("stored log deletion").data.is_none(),
+        "the compacted table still masks its old log"
+    );
+    assert!(after.try_find_reference(BStr::new(b"refs/a"))?.is_none());
+    assert!(
+        after.try_find_reference(BStr::new(b"refs/c"))?.is_some(),
+        "unrelated refs survive"
+    );
+    assert!(
+        after.logs(BStr::new(b"refs/a"))?.next_record()?.is_none(),
+        "the old log cannot reappear"
+    );
+    assert!(
+        before.try_find_reference(BStr::new(b"refs/c"))?.is_some(),
+        "existing readers keep their old snapshot"
+    );
+    Ok(())
+}
+
+#[test]
+fn git_reads_and_extends_a_partially_compacted_stack() -> crate::Result {
+    if *gix_testtools::GIT_VERSION < (2, 45, 0) {
+        return Ok(());
+    }
+    let dir = super::writable_fixture("reftable")?;
+    let repo = dir.path().join("repo");
+    let stack = Stack::at(repo.join(".git/reftable"), gix_testtools::object_hash());
+    let base_count = stack.snapshot()?.table_names().len();
+    let first = super::baseline("files", "first.id")?;
+    let object_id = gix_hash::ObjectId::from_hex(first.trim_end())?;
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    let index = locked.next_update_index()?;
+    locked.append(super::append::next_header(index), |writer| {
+        writer.push_reference(ReferenceRef {
+            name: BStr::new(b"refs/heads/topic"),
+            update_index: index,
+            value: ValueRef::Deletion,
+        })
+    })?;
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    let index = locked.next_update_index()?;
+    locked.append(super::append::next_header(index), |writer| {
+        writer.push_reference(ReferenceRef {
+            name: BStr::new(b"refs/heads/written"),
+            update_index: index,
+            value: ValueRef::Object {
+                object_id: object_id.as_ref(),
+                peeled_id: None,
+            },
+        })
+    })?;
+
+    let after = compact(&stack, base_count..base_count + 2)?;
+    assert_eq!(
+        after.table_names().len(),
+        base_count + 1,
+        "the lower tables are unchanged"
+    );
+    assert!(
+        gix_testtools::git(&repo, "rev-parse --verify refs/heads/topic").is_err(),
+        "Git still sees the tombstone masking the lower table"
+    );
+    assert_eq!(
+        gix_testtools::git(&repo, "rev-parse --verify refs/heads/written")?
+            .as_bytes()
+            .as_bstr(),
+        first.as_bstr(),
+        "Git reads the replacement table"
+    );
+    if *gix_testtools::GIT_VERSION >= (2, 52, 0) {
+        gix_testtools::git(&repo, "refs verify --strict")?;
+    }
+    gix_testtools::git(
+        &repo,
+        &format!("update-ref refs/heads/post-compact {}", first.trim_end().as_bstr()),
+    )?;
+    assert!(
+        stack
+            .snapshot()?
+            .try_find_reference(BStr::new(b"refs/heads/post-compact"))?
+            .is_some(),
+        "Git can append to the compacted stack"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_range_from_an_older_snapshot_cannot_compact_different_tables() -> crate::Result {
+    let dir = gix_testtools::tempfile::TempDir::new()?;
+    let stack = Stack::at(dir.path(), gix_testtools::object_hash());
+    for index in 1..=5 {
+        let name = format!("refs/{index}");
+        append(&stack, name.as_bytes().as_bstr(), Some(index as u8), index)?;
+    }
+    let original = stack.snapshot()?;
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    locked.compact(original.select_tables(1..3)?, CompactionOptions::default())?;
+    let current = stack.snapshot()?;
+    assert_eq!(
+        current.table_names().len(),
+        4,
+        "a pair overlapping the selection was replaced"
+    );
+    let expected = current.table_names().map(ToOwned::to_owned).collect::<Vec<_>>();
+
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    let error = locked
+        .compact(original.select_tables(2..4)?, CompactionOptions::default())
+        .err()
+        .expect("the stale selection must be rejected");
+    assert!(
+        error.is_conflict(),
+        "2..4 from the old snapshot must not silently replace different tables"
+    );
+    assert_eq!(
+        stack.snapshot()?.table_names().collect::<Vec<_>>(),
+        expected,
+        "failed validation leaves the manifest untouched"
+    );
+    assert_eq!(
+        original.table_names().len(),
+        5,
+        "the earlier snapshot retains its original view"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_name_bound_range_can_move_when_earlier_tables_are_compacted() -> crate::Result {
+    let dir = gix_testtools::tempfile::TempDir::new()?;
+    let stack = Stack::at(dir.path(), gix_testtools::object_hash());
+    for index in 1..=5 {
+        let name = format!("refs/{index}");
+        append(&stack, name.as_bytes().as_bstr(), Some(index as u8), index)?;
+    }
+    let original = stack.snapshot()?;
+    let selection = original.select_tables(3..5)?;
+    let unchanged = original.table_names().nth(2).expect("middle table").to_owned();
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    locked.compact(original.select_tables(0..2)?, CompactionOptions::default())?;
+
+    let locked = stack.lock(gix_lock::acquire::Fail::Immediately)?;
+    let after = locked.compact(selection, CompactionOptions::default())?;
+    assert_eq!(after.table_names().len(), 3, "both selected tables are merged");
+    assert_eq!(
+        after.table_names().nth(1).expect("unselected middle table"),
+        unchanged,
+        "earlier compaction does not redirect the selected range"
+    );
+    Ok(())
 }
