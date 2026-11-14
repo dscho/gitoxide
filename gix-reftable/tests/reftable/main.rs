@@ -35,3 +35,4 @@ fn table_paths() -> Result<Vec<PathBuf>> {
 
 mod envelope;
 mod oracle;
+mod reference;

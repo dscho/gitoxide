@@ -77,7 +77,7 @@ impl<'a> Table<'a> {
         }
         let header_len = self.header.version.header_len();
         let footer_start = self.data.len() - self.header.version.footer_len();
-        let first_kind = (footer_start > header_len).then(|| self.data[header_len]);
+        let first_kind = self.first_block_kind();
         if !matches!(first_kind, None | Some(b'r' | b'g')) {
             bail!(corruption("The first table block must contain references or logs"));
         }

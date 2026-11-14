@@ -1,6 +1,6 @@
 use gix_reftable::{Table, Version};
 
-fn empty_table(version: u8, hash: &[u8; 4]) -> Vec<u8> {
+pub(super) fn empty_table(version: u8, hash: &[u8; 4]) -> Vec<u8> {
     let mut header = b"REFT".to_vec();
     header.push(version);
     header.extend_from_slice(&[0; 19]);
@@ -15,7 +15,7 @@ fn empty_table(version: u8, hash: &[u8; 4]) -> Vec<u8> {
     data
 }
 
-fn update_checksum(data: &mut [u8]) {
+pub(super) fn update_checksum(data: &mut [u8]) {
     let header_len = if data[4] == 1 { 24 } else { 28 };
     let end = data.len() - 4;
     let start = end - header_len - 40;

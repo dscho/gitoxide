@@ -4,5 +4,10 @@ use libfuzzer_sys::fuzz_target;
 use std::hint::black_box;
 
 fuzz_target!(|data: &[u8]| {
-    _ = black_box(gix_reftable::Table::from_bytes(data));
+    if let Ok(table) = gix_reftable::Table::from_bytes(data) {
+        let mut references = table.references();
+        while let Ok(Some(reference)) = references.next_record() {
+            _ = black_box(reference);
+        }
+    }
 });

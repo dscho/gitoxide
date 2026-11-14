@@ -5,6 +5,9 @@
 //! concerns and are not handled here.
 #![deny(missing_docs, unsafe_code)]
 
+/// Byte-string types used for reference names and record data.
+pub use bstr;
+
 /// The on-disk reftable format version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Version {
@@ -37,4 +40,20 @@ pub struct Table<'a> {
     footer: table::Footer,
 }
 
+/// A decoded reference record borrowing its cursor's key buffer and table data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceRef<'a> {
+    /// The full reference name, without applying repository namespace policy.
+    pub name: &'a bstr::BStr,
+    /// The transaction index that last changed this reference.
+    pub update_index: u64,
+    /// The stored value, including deletion records.
+    pub value: reference::ValueRef<'a>,
+}
+
+/// Reference records and their reusable read cursor.
+pub mod reference;
+
+mod block;
+mod decode;
 mod table;

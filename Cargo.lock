@@ -2456,6 +2456,7 @@ dependencies = [
 name = "gix-reftable"
 version = "0.1.0"
 dependencies = [
+ "bstr",
  "crc32fast",
  "gix-error",
  "gix-hash",
