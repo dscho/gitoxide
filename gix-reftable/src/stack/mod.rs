@@ -79,7 +79,11 @@ impl Snapshot {
     }
 
     fn parsed_tables(&self) -> Result<Vec<Table<'_>>> {
-        self.tables
+        self.parsed_range(0..self.tables.len())
+    }
+
+    fn parsed_range(&self, range: std::ops::Range<usize>) -> Result<Vec<Table<'_>>> {
+        self.tables[range]
             .iter()
             .map(|table| {
                 Table::from_bytes(&table.data)
@@ -115,5 +119,8 @@ pub mod log;
 /// Merged reference views over immutable snapshots.
 pub mod reference;
 
+pub use compact::CompactionOptions;
+
 mod append;
+mod compact;
 mod init;
