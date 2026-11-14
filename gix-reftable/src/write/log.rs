@@ -3,7 +3,7 @@ use std::io::Write;
 use bstr::ByteSlice;
 use gix_error::{OptionExt, Result, ResultExt, bail, message, validation};
 
-use super::{MAX_BLOCK_SIZE, RESTART_INTERVAL, Writer, encode_key, seal_block, varint};
+use super::{IndexEntry, MAX_BLOCK_SIZE, RESTART_INTERVAL, Writer, encode_key, seal_block, varint};
 use crate::{LogRef, log::DataRef};
 
 impl<W: Write> Writer<W> {
@@ -97,8 +97,27 @@ impl<W: Write> Writer<W> {
             self.record = record;
             self.failed = true;
         }
-        if !self.append_record(&key, restart, limit)? {
+        if self.append_record(&key, restart, limit)? {
+            self.failed = false;
+            return Ok(());
+        }
+        if first || self.record_count == 0 {
             bail!(validation("Reflog block exceeds the table's log block size"));
+        }
+
+        self.record.clear();
+        encode_key(&mut self.record, &key, &[], true, u64::from(log.data.is_some()))?;
+        if let Some(data) = log.data {
+            encode_data(&mut self.record, data)?;
+        }
+        if self.record.len().checked_add(9).is_none_or(|size| size > limit) {
+            bail!(validation("Reflog record exceeds the table's log block size"));
+        }
+        let entry = self.flush_log_block()?;
+        self.log_index.push(entry);
+        self.failed = true;
+        if !self.append_record(&key, true, limit)? {
+            bail!(validation("Reflog record could not start a new block"));
         }
         self.failed = false;
         Ok(())
@@ -114,7 +133,8 @@ impl<W: Write> Writer<W> {
             let entry = self.flush_block(true)?;
             if indexed {
                 self.index.push(entry);
-                self.ref_index_root = self.write_reference_index()?;
+                let level = std::mem::take(&mut self.index);
+                self.ref_index_root = self.write_index(level, true)?;
             }
         }
         self.log_start = Some(self.offset);
@@ -130,8 +150,12 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
-    pub(super) fn flush_log_block(&mut self) -> Result<()> {
+    pub(super) fn flush_log_block(&mut self) -> Result<IndexEntry> {
         self.failed = true;
+        let mut key = Vec::new();
+        key.try_reserve(self.previous_key.len())
+            .or_raise(|| message("Could not allocate the reflog-index key"))?;
+        key.extend_from_slice(&self.previous_key);
         let header_skip = if self.offset == 0 {
             self.header.version.header_len()
         } else {
@@ -159,9 +183,17 @@ impl<W: Write> Writer<W> {
         self.out
             .write_all(&compressed)
             .or_raise(|| message("Could not write the compressed reflog block"))?;
+        let entry = IndexEntry {
+            key,
+            offset: self.offset,
+        };
         self.offset = next_offset;
+        self.block.clear();
+        self.block.extend_from_slice(b"g\0\0\0");
+        self.restarts.clear();
+        self.record_count = 0;
         self.failed = false;
-        Ok(())
+        Ok(entry)
     }
 }
 

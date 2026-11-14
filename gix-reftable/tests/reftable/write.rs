@@ -40,7 +40,7 @@ pub(super) fn append_manifest(reftable: &std::path::Path, filename: &str) -> cra
 }
 
 #[derive(Default)]
-struct FailOnce {
+pub(super) struct FailOnce {
     failed: bool,
     bytes: Vec<u8>,
 }

@@ -31,6 +31,12 @@ fn log<'a>(name: &'a BStr, update_index: u64, data: Option<DataRef<'a>>) -> LogR
     }
 }
 
+fn log_index_root(bytes: &[u8]) -> crate::Result<usize> {
+    Ok(usize::try_from(u64::from_be_bytes(
+        bytes[bytes.len() - 12..bytes.len() - 4].try_into()?,
+    ))?)
+}
+
 #[test]
 fn compressed_log_only_tables_preserve_updates_and_deletions() -> crate::Result {
     let (old, new) = object_ids()?;
@@ -175,6 +181,145 @@ fn a_failed_compressed_log_write_reports_an_error() -> crate::Result {
             .to_string()
             .contains("Could not write the compressed reflog block"),
         "an output error must not appear to finish a table"
+    );
+    Ok(())
+}
+
+#[test]
+fn multiple_log_blocks_have_a_searchable_index() -> crate::Result {
+    let (old, new) = object_ids()?;
+    let mut header = super::write::header();
+    header.block_size = 128;
+    header.max_update_index = 80;
+    let mut writer = Writer::new(Vec::new(), header)?;
+    for index in (18..=80).rev() {
+        let message = format!("native update {index}\n");
+        writer.push_log(log(
+            BStr::new(b"refs/heads/topic"),
+            index,
+            Some(update(old.as_ref(), new.as_ref(), message.as_bytes().as_bstr())),
+        ))?;
+    }
+    let bytes = writer.finish()?;
+    let root = log_index_root(&bytes)?;
+    assert!(root > 0, "multiple compressed log blocks require an index");
+    assert_eq!(bytes[root], b'i', "the footer points to a log index block");
+    let table = Table::from_bytes(&bytes)?;
+    let mut logs = table.logs();
+    for index in (18..=80).rev() {
+        let record = logs.next_record()?.expect("every log entry survives compression");
+        assert_eq!(record.update_index, index, "newer updates precede older ones");
+    }
+    assert!(logs.next_record()?.is_none(), "the log index is not a log entry");
+    for index in [80, 51, 18] {
+        logs.seek(BStr::new(b"refs/heads/topic"), index)?;
+        assert_eq!(logs.next_record()?.expect("indexed log").update_index, index);
+    }
+    Ok(())
+}
+
+#[test]
+fn an_oversized_restarted_log_keeps_the_previous_block_complete() -> crate::Result {
+    let (old, new) = object_ids()?;
+    let hash_len = gix_testtools::object_hash().len_in_bytes();
+    let mut header = super::write::header();
+    header.block_size = 128;
+    let first = log(BStr::new(b"refs/heads/topic"), 18, None);
+    let message = vec![b'x'; if hash_len == 20 { 160 } else { 136 }];
+    let value_bytes = first.name.len() + 9 + 2 * hash_len + 6 + 18 + message.len();
+    assert!(value_bytes < 256, "the record must reach the restart-size check");
+    let mut writer = Writer::new(Vec::new(), header)?;
+    writer.push_log(first)?;
+    assert!(
+        writer
+            .push_log(log(
+                first.name,
+                17,
+                Some(update(old.as_ref(), new.as_ref(), message.as_bytes().as_bstr())),
+            ))
+            .is_err(),
+        "a record too large after a restart must not flush the previous block"
+    );
+    let bytes = writer.finish()?;
+    let table = Table::from_bytes(&bytes)?;
+    let mut logs = table.logs();
+    assert_eq!(logs.next_record()?, Some(first), "the valid log remains readable");
+    assert!(
+        logs.next_record()?.is_none(),
+        "a rejected log must not corrupt the block"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failed_intermediate_log_write_cannot_be_finished() -> crate::Result {
+    let (old, new) = object_ids()?;
+    let mut header = super::write::header();
+    header.block_size = 128;
+    header.max_update_index = 80;
+    let mut writer = Writer::new(super::write::FailOnce::default(), header)?;
+    let mut failed_on_write = false;
+    for index in (18..=80).rev() {
+        let message = format!("native update {index}\n");
+        if let Err(error) = writer.push_log(log(
+            BStr::new(b"refs/heads/topic"),
+            index,
+            Some(update(old.as_ref(), new.as_ref(), message.as_bytes().as_bstr())),
+        )) {
+            assert!(
+                error.to_string().contains("Could not write the reflog block header"),
+                "the first full block fails while writing"
+            );
+            failed_on_write = true;
+            break;
+        }
+    }
+    assert!(failed_on_write, "a full log block must reach the failing output");
+    assert!(
+        writer.finish().is_err(),
+        "a failed write cannot produce a complete table"
+    );
+    Ok(())
+}
+
+#[test]
+fn git_reads_indexed_native_reflogs() -> crate::Result {
+    if *gix_testtools::GIT_VERSION < (2, 45, 0) {
+        return Ok(());
+    }
+    let dir = super::writable_fixture("reftable")?;
+    let repo = dir.path().join("repo");
+    let reftable = repo.join(".git/reftable");
+    let first = super::baseline("files", "first.id")?;
+    let second = super::baseline("files", "second.id")?;
+    let old = gix_hash::ObjectId::from_hex(first.trim_end())?;
+    let new = gix_hash::ObjectId::from_hex(second.trim_end())?;
+    let filename = "0x000000000012-0x000000000050-00000001.ref";
+    let mut header = super::write::header();
+    header.block_size = 128;
+    header.max_update_index = 80;
+    let mut writer = Writer::new(std::fs::File::create(reftable.join(filename))?, header)?;
+    for index in (18..=80).rev() {
+        let message = format!("native-{index}\n");
+        writer.push_log(log(
+            BStr::new(b"refs/heads/topic"),
+            index,
+            Some(update(old.as_ref(), new.as_ref(), message.as_bytes().as_bstr())),
+        ))?;
+    }
+    writer.finish()?;
+    super::write::append_manifest(&reftable, filename)?;
+    let visible = gix_testtools::git(&repo, "reflog show --format=%gs refs/heads/topic")?;
+    assert!(
+        visible.as_bytes().starts_with(b"native-80\nnative-79\n"),
+        "Git reads the newest indexed log entries: {visible:?}"
+    );
+    assert!(
+        visible
+            .as_bytes()
+            .split(|byte| *byte == b'\n')
+            .any(|line| line == b"native-18".as_slice()),
+        "Git traverses all compressed log blocks"
     );
     Ok(())
 }

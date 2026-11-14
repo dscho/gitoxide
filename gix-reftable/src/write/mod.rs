@@ -31,6 +31,7 @@ pub struct Writer<W> {
     restarts: Vec<usize>,
     record_count: usize,
     index: Vec<IndexEntry>,
+    log_index: Vec<IndexEntry>,
 }
 
 impl<W: Write> Writer<W> {
@@ -76,6 +77,7 @@ impl<W: Write> Writer<W> {
             restarts: Vec::new(),
             record_count: 0,
             index: Vec::new(),
+            log_index: Vec::new(),
         })
     }
 
@@ -165,22 +167,35 @@ impl<W: Write> Writer<W> {
             bail!(validation("Cannot finish a table after a failed write"));
         }
         let header_len = self.header.version.header_len();
-        let root = if self.log_start.is_some() {
-            self.flush_log_block()?;
-            self.ref_index_root
+        let (root, log_root) = if self.log_start.is_some() {
+            let indexed = !self.log_index.is_empty();
+            let entry = self.flush_log_block()?;
+            if indexed {
+                self.log_index.push(entry);
+                let level = std::mem::take(&mut self.log_index);
+                (self.ref_index_root, self.write_index(level, false)?)
+            } else {
+                (self.ref_index_root, 0)
+            }
         } else if self.record_count == 0 {
             self.block.truncate(header_len);
             self.out
                 .write_all(&self.block)
                 .or_raise(|| message("Could not write the reftable block"))?;
-            0
+            (0, 0)
         } else {
             let indexed = !self.index.is_empty();
             let entry = self.flush_block(indexed)?;
             if indexed {
                 self.index.push(entry);
             }
-            if indexed { self.write_reference_index()? } else { 0 }
+            let root = if indexed {
+                let level = std::mem::take(&mut self.index);
+                self.write_index(level, true)?
+            } else {
+                0
+            };
+            (root, 0)
         };
         let mut footer = [0; 72];
         footer[..header_len].copy_from_slice(&self.header_bytes[..header_len]);
@@ -188,6 +203,7 @@ impl<W: Write> Writer<W> {
         if let Some(start) = self.log_start {
             footer[header_len + 24..header_len + 32].copy_from_slice(&start.to_be_bytes());
         }
+        footer[header_len + 32..header_len + 40].copy_from_slice(&log_root.to_be_bytes());
         let footer_end = header_len + 40;
         let checksum = crc32fast::hash(&footer[..footer_end]);
         footer[footer_end..footer_end + 4].copy_from_slice(&checksum.to_be_bytes());
@@ -262,7 +278,7 @@ impl<W: Write> Writer<W> {
             .ok_or_raise(|| validation("Reftable offset exceeds the format limit"))?;
         self.out.write_all(&self.block).or_raise(|| {
             if kind == b'i' {
-                message("Could not write the reference index")
+                message("Could not write the reftable index")
             } else {
                 message("Could not write the reference block")
             }
@@ -280,8 +296,7 @@ impl<W: Write> Writer<W> {
         Ok(entry)
     }
 
-    fn write_reference_index(&mut self) -> Result<u64> {
-        let mut level = std::mem::take(&mut self.index);
+    fn write_index(&mut self, mut level: Vec<IndexEntry>, aligned: bool) -> Result<u64> {
         loop {
             self.block.clear();
             self.block.extend_from_slice(b"i\0\0\0");
@@ -294,30 +309,30 @@ impl<W: Write> Writer<W> {
                     .key
                     .len()
                     .checked_add(40)
-                    .ok_or_raise(|| validation("Reference-index key is too long"))?;
+                    .ok_or_raise(|| validation("Index key is too long"))?;
                 loop {
                     let restart = self.record_count.is_multiple_of(RESTART_INTERVAL);
                     self.record.clear();
                     self.record
                         .try_reserve(capacity)
-                        .or_raise(|| message("Could not allocate the reference-index record"))?;
+                        .or_raise(|| message("Could not allocate the index record"))?;
                     encode_key(&mut self.record, &entry.key, &self.previous_key, restart, 0)?;
                     varint(entry.offset, &mut self.record);
                     if self.append_record(&entry.key, restart, self.block_size())? {
                         break;
                     }
                     if self.record_count == 0 {
-                        bail!(validation("Reference-index record exceeds the table's block size"));
+                        bail!(validation("Index record exceeds the table's block size"));
                     }
-                    next.push(self.flush_block(true)?);
+                    next.push(self.flush_block(aligned)?);
                 }
             }
-            next.push(self.flush_block(true)?);
+            next.push(self.flush_block(aligned)?);
             if next.len() == 1 {
                 return Ok(next[0].offset);
             }
             if next.len() >= level.len() {
-                bail!(validation("Reference index cannot fit a root block"));
+                bail!(validation("Reftable index cannot fit a root block"));
             }
             level = next;
         }
